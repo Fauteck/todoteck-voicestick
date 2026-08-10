@@ -290,3 +290,7 @@ Default output directory:
 ```
 
 Each valid recognition session is saved as a playable Ogg Opus file. Recordings shorter than 0.5 seconds are discarded by the desktop app and are not sent to ASR.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
