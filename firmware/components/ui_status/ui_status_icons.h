@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include "lvgl.h"
 
 typedef enum {
@@ -32,5 +34,7 @@ typedef struct {
 
 void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen);
 void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scene);
+/* Platz machen: bei langem Text weicht die Figur dem Text. */
+void ui_status_icons_show(ui_status_icons_t *icons, bool visible);
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene);
 void ui_status_icons_stop_anim(ui_status_icons_t *icons);

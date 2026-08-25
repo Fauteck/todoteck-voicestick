@@ -85,18 +85,29 @@ included when a `primary` press starts or stops a local audio recording.
 
 ### Fork addition: `recording_discarded`
 
-The Todoteck fork emits one further state event when the side button aborts a
-running recording:
+The Todoteck fork emits one further state event when a recording is thrown away
+on the device:
 
 ```json
 {"event":"recording_discarded","session_id":1234}
 ```
 
 It is a device fact, not an app action: tearing the capture path down always
-produces a normal END audio frame, so without this event an abort is
+produces a normal END audio frame, so without this event a discarded take is
 indistinguishable from a completed utterance and the bridge would upload it.
 The event is sent before the END frame. A bridge that does not know it keeps
-working — it simply uploads the aborted take, exactly as before.
+working — it simply uploads the discarded take, exactly as before.
+
+Three situations produce it, and the app does not need to tell them apart:
+
+| Situation | Screen |
+| --- | --- |
+| The `secondary` button is pressed while recording | `Abgebrochen` |
+| The `primary` button is pressed *again* while recording | `Abgebrochen` |
+| The `primary` button was held for less than 500 ms | `Zu kurz` |
+
+The 500 ms match `MIN_TURN_MILLIS` in the Todoteck bridge, which dropped such
+takes anyway — silently, and only after they had been transferred.
 
 This is deliberately *not* called `cancel`; see the deprecation table below.
 

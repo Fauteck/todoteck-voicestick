@@ -16,6 +16,7 @@ void ui_status_set_idle_text(const char *text);
 void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_show_last_answer(void);
 void ui_status_set_cancelled(void);
+void ui_status_set_press_too_short(void);
 void ui_status_set_link(bool connected);
 void ui_status_set_recording_meter(uint8_t level_percent, uint8_t remaining_percent);
 void ui_status_set_recording(uint32_t session_id);

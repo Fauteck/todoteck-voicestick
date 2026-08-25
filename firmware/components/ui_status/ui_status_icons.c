@@ -260,6 +260,20 @@ void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
     ui_status_icons_apply(icons, UI_STATUS_ICON_BOOT);
 }
 
+/*
+ * Tecki tritt beiseite, wenn eine Antwort mehr Platz braucht, als neben ihm
+ * frei ist — die Entscheidung faellt in ui_status.c am gemessenen Text.
+ * Versteckt wird die ganze Gruppe: Koerper, Augen und Punkte haengen an
+ * `root`, ein Flag genuegt also fuer alle.
+ */
+void ui_status_icons_show(ui_status_icons_t *icons, bool visible)
+{
+    if (icons->root == NULL) {
+        return;
+    }
+    show(icons->root, visible);
+}
+
 void ui_status_icons_stop_anim(ui_status_icons_t *icons)
 {
     /*
