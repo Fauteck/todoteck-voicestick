@@ -1,0 +1,81 @@
+# Baut die Fork-Firmware, ohne dass jemand ESP-IDF auf seinem Rechner braucht.
+#
+# Warum eine eigene Datei statt eines Anbaus an `release.yml`: Der dortige
+# Firmware-Job ist an eine Veroeffentlichung gekettet — er prueft den Tag gegen
+# `VERSION`, laedt nach Aliyun OSS hoch, braucht Apple-Zertifikate fuer den
+# macOS-Job und stoesst am Ende einen Website-Deploy im **Upstream**-Repo an.
+# Nichts davon geht in diesem Fork, und keins davon hat mit "gib mir ein
+# aktuelles Abbild" zu tun.
+#
+# Heraus kommen zwei Dateien:
+#
+#   voice_stick.bin  — das reine Anwendungsabbild. Das ist es, was die
+#                      Todoteck-Bruecke ueber Bluetooth aufspielt.
+#   merged.bin       — Bootloader, Partitionstabelle und Anwendung in einem.
+#                      Der Rettungsweg ueber USB, falls eine Fassung die
+#                      Funkstrecke zerlegt und OTA nicht mehr greift:
+#                      `python -m esptool --chip esp32s3 write_flash 0x0 merged.bin`
+#                      Braucht nur esptool, keine Werkzeugkette.
+
+name: Firmware bauen
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: StickS3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bauen
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s3
+          path: firmware
+          command: |
+            idf.py build
+            mkdir -p ../dist
+            cp build/voice_stick.bin ../dist/voice_stick.bin
+            cd build
+            esptool.py --chip esp32s3 merge_bin -o ../../dist/merged.bin @flash_args
+
+      - name: Groesse gegen die OTA-Partition pruefen
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" dist
+          size=$(wc -c < dist/voice_stick.bin)
+          # ota_0 und ota_1 fassen je 0x300000 laut partitions_ota.csv. Ein
+          # Abbild, das nicht hineinpasst, wird von esp_ota_begin abgewiesen —
+          # dann steht man mit einer fertigen Datei vor einem Geraet, das sie
+          # nicht nimmt. Lieber hier scheitern.
+          limit=$((0x300000))
+          echo "voice_stick.bin: ${size} Byte von ${limit} ($((size * 100 / limit)) %)"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error ::Abbild passt nicht in die OTA-Partition"
+            exit 1
+          fi
+          {
+            echo "### Firmware"
+            echo
+            echo "| Datei | Groesse |"
+            echo "|---|---|"
+            echo "| \`voice_stick.bin\` (OTA) | $((size / 1024)) kB von $((limit / 1024)) kB |"
+            echo "| \`merged.bin\` (USB) | $(( $(wc -c < dist/merged.bin) / 1024 )) kB |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
