@@ -188,6 +188,27 @@ Rescue flashing needs esptool only, no toolchain:
 python -m esptool --chip esp32s3 write_flash 0x0 merged.bin
 ```
 
+### Getting the image without a GitHub login
+
+Runs on `main` additionally attach both images, plus a small `firmware.json`
+manifest (commit, build time, sizes, SHA-256), to the rolling pre-release
+[`firmware-latest`](https://github.com/Fauteck/todoteck-voicestick/releases/tag/firmware-latest).
+Artifacts stay for per-commit debugging, but they are a poor pickup path: an
+artifact is always a ZIP, expires after 90 days, and needs a token even on a
+public repository. A release asset is a single file at a fixed URL:
+
+```sh
+curl -LO https://github.com/Fauteck/todoteck-voicestick/releases/download/firmware-latest/voice_stick.bin
+```
+
+That is what `scripts/fetch-firmware.ps1` in the
+[Todoteck repository](https://github.com/Fauteck/todo) uses to drop both images
+into the shared Drive folder the phone flashes from — no credentials involved.
+
+The tag is deliberately not a `v*` one: `release.yml` triggers on `push: tags:
+["v*"]` and would check the tag against `VERSION`, upload to Aliyun OSS and
+kick off a website deploy in the **upstream** repository.
+
 ## Firmware Build Locally
 
 Optional — CI covers the normal case. Prepare ESP-IDF; the commands below use
