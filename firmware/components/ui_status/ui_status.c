@@ -331,7 +331,7 @@ static void create_status_ui(void)
     ui_status_icons_create(&s_icons, s_screen);
 
     s_status_label = lv_label_create(s_screen);
-    lv_label_set_text(s_status_label, "Booting");
+    lv_label_set_text(s_status_label, s_status_text);
     lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, LCD_H_RES - 16);
@@ -343,7 +343,7 @@ static void create_status_ui(void)
     lv_obj_set_width(s_hint_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x7f7180), 0);
-    lv_label_set_text(s_hint_label, "Starting up");
+    lv_label_set_text(s_hint_label, s_hint_text);
     lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     s_ready = true;
