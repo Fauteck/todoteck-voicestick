@@ -111,12 +111,41 @@ typedef struct {
     uint32_t written;
     uint32_t size;
     char state[32];
-    char text[96];
+    /*
+     * 192 statt 96 Byte: die Funkstrecke traegt 244 je Schreibvorgang
+     * (MTU 247 abzueglich ATT-Kopf), die Grenze lag also frueher hier und
+     * nicht am Uebertragungsweg. In UTF-8 kostet ein Umlaut zwei Byte — mit
+     * 96 waeren deutsche Antworten regelmaessig mitten im Wort geendet.
+     */
+    char text[192];
 } app_event_t;
 
 static void update_battery_status(void);
 static void queue_app_event(app_event_type_t type);
 static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size);
+/*
+ * Kopiert hoechstens `size - 1` Byte und schneidet dabei **nie** mitten in
+ * ein UTF-8-Zeichen. `strlcpy` wuerde genau das tun: ein halbierter Umlaut
+ * ergibt auf dem Display ein Kaestchen, und LVGL laeuft beim Dekodieren ins
+ * Leere.
+ */
+static void copy_utf8_clipped(char *dst, const char *src, size_t size)
+{
+    if (size == 0) {
+        return;
+    }
+    size_t len = strlen(src);
+    if (len >= size) {
+        len = size - 1;
+        /* Fortsetzungsbytes tragen 10xxxxxx — bis zum Anfang zuruecklaufen. */
+        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) {
+            len--;
+        }
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 static void queue_ui_state_event(const char *state, const char *text);
 static void apply_interaction_mode(interaction_mode_t mode);
 
@@ -435,7 +464,7 @@ static void queue_ui_state_event(const char *state, const char *text)
         strlcpy(event.state, state, sizeof(event.state));
     }
     if (text) {
-        strlcpy(event.text, text, sizeof(event.text));
+        copy_utf8_clipped(event.text, text, sizeof(event.text));
     }
     ESP_LOGI(TAG, "queue ui_state state=%s text_len=%u current=%s recording=%d",
              event.state[0] ? event.state : "nil",
@@ -535,7 +564,9 @@ static void apply_app_ui_state(const char *state, const char *text)
             return;
         }
         s_app_ui_state = APP_UI_STATE_READY;
-        ui_status_set_idle();
+        /* Traegt die Antwort einen Text, gehoert er aufs Display — bisher
+         * wurde er hier verworfen und war damit nur in der App zu sehen. */
+        ui_status_set_idle_text(text);
         note_activity();
         voice_ble_request_slow_interval();
     } else if (strcmp(state, "recording") == 0) {

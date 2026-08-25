@@ -12,6 +12,7 @@ void ui_status_set_advertising(void);
 void ui_status_set_pairing(const char *device_name);
 void ui_status_set_idle_hint(const char *hint);
 void ui_status_set_idle(void);
+void ui_status_set_idle_text(const char *text);
 void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_set_recording(uint32_t session_id);
 void ui_status_set_battery(int level_percent, bool charging, bool usb_powered);

@@ -49,8 +49,17 @@ static const char *TAG = "ui_status";
 #define LCD_BACKLIGHT_LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LCD_BACKLIGHT_LEDC_TIMER LEDC_TIMER_0
 #define LCD_BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
+/*
+ * Eigene Schriften statt der eingebauten LVGL-Montserrat: die bringen nur
+ * ASCII mit, "Rueckspuelen" erschiene also mit Luecken. Diese hier sind mit
+ * lv_font_conv aus Montserrat erzeugt und decken zusaetzlich Latin-1 ab,
+ * also Umlaute und Eszett.
+ */
+LV_FONT_DECLARE(todoteck_font_16);
+LV_FONT_DECLARE(todoteck_font_10);
+
 #define UI_STATUS_TEXT_MAX 32
-#define UI_HINT_TEXT_MAX 96
+#define UI_HINT_TEXT_MAX 192
 
 static _lock_t s_lvgl_lock;
 static bool s_ready;
@@ -66,9 +75,9 @@ static lv_obj_t *s_battery_tip;
 static lv_obj_t *s_battery_label;
 static ui_status_icons_t s_icons;
 static ui_status_icon_scene_t s_scene = UI_STATUS_ICON_BOOT;
-static char s_status_text[UI_STATUS_TEXT_MAX] = "Booting";
-static char s_hint_text[UI_HINT_TEXT_MAX] = "Starting up";
-static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Hold to Talk";
+static char s_status_text[UI_STATUS_TEXT_MAX] = "Startet";
+static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
+static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Halten zum Sprechen";
 static char s_device_name[16] = "BLE";
 static bool s_dimmed;
 
@@ -152,7 +161,7 @@ static void create_battery_ui(lv_obj_t *screen)
     s_battery_label = lv_label_create(screen);
     lv_label_set_text(s_battery_label, "--%");
     lv_obj_set_style_text_color(s_battery_label, lv_color_hex(0x675f71), 0);
-    lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(s_battery_label, &todoteck_font_10, 0);
     lv_label_set_long_mode(s_battery_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_battery_label, 28);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
@@ -206,7 +215,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 static void render_current_locked(void)
 {
     if (s_dimmed) {
-        render_scene_locked(UI_STATUS_ICON_RESTING, "Resting", "");
+        render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "");
     } else {
         render_scene_locked(s_scene, s_status_text, s_hint_text);
     }
@@ -221,7 +230,7 @@ static void create_status_ui(void)
 
     s_top_label = lv_label_create(s_screen);
     lv_label_set_text(s_top_label, s_device_name);
-    lv_obj_set_style_text_font(s_top_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(s_top_label, &todoteck_font_10, 0);
     lv_obj_set_style_text_color(s_top_label, lv_color_hex(0x7f7180), 0);
     lv_label_set_long_mode(s_top_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_top_label, 66);
@@ -235,7 +244,7 @@ static void create_status_ui(void)
 
     s_status_label = lv_label_create(s_screen);
     lv_label_set_text(s_status_label, "Booting");
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -253,12 +262,33 @@ static void create_status_ui(void)
     render_current_locked();
 }
 
+/*
+ * Wie strlcpy, schneidet aber nie mitten in ein UTF-8-Zeichen. Ein halbierter
+ * Umlaut ergaebe auf dem Display ein Kaestchen — und die Texte kommen von
+ * aussen, sind also nicht vorhersehbar lang.
+ */
+static void copy_utf8_clipped(char *dst, const char *src, size_t size)
+{
+    if (size == 0) {
+        return;
+    }
+    size_t len = strlen(src);
+    if (len >= size) {
+        len = size - 1;
+        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) {
+            len--;
+        }
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
     s_scene = scene;
-    strlcpy(s_status_text, status ? status : "", sizeof(s_status_text));
-    strlcpy(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
+    copy_utf8_clipped(s_status_text, status ? status : "", sizeof(s_status_text));
+    copy_utf8_clipped(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
 }
@@ -409,22 +439,22 @@ void ui_status_set_device_name(const char *device_name)
 void ui_status_set_advertising(void)
 {
     ESP_LOGD(TAG, "advertising");
-    set_scene(UI_STATUS_ICON_PAIRING, "Pairing", "Open the Mac app");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", "Brücke starten");
 }
 
 void ui_status_set_pairing(const char *device_name)
 {
     ESP_LOGD(TAG, "pairing %s", device_name ? device_name : "");
     ui_status_set_device_name(device_name);
-    set_scene(UI_STATUS_ICON_PAIRING, "Pairing", device_name ? device_name : "VS-0000");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", device_name ? device_name : "VS-0000");
 }
 
 void ui_status_set_idle_hint(const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
-    strlcpy(s_idle_hint_text, hint && hint[0] ? hint : "Hold to Talk", sizeof(s_idle_hint_text));
+    copy_utf8_clipped(s_idle_hint_text, hint && hint[0] ? hint : "Halten zum Sprechen", sizeof(s_idle_hint_text));
     if (s_scene == UI_STATUS_ICON_IDLE) {
-        strlcpy(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
+        copy_utf8_clipped(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
         render_current_locked();
     }
     _lock_release(&s_lvgl_lock);
@@ -433,7 +463,26 @@ void ui_status_set_idle_hint(const char *hint)
 void ui_status_set_idle(void)
 {
     ESP_LOGD(TAG, "idle");
-    set_scene(UI_STATUS_ICON_IDLE, "Ready", s_idle_hint_text);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_idle_hint_text);
+}
+
+/*
+ * Wie ui_status_set_idle(), zeigt aber die Antwort der Bruecke statt des
+ * Standard-Hinweises. Der Text bleibt stehen, bis der naechste Turn beginnt —
+ * wer ihn verpasst hat, soll ihn noch lesen koennen.
+ *
+ * Ohne das bliebe die eigentliche Auskunft ("Aufgabe angelegt: Pool
+ * rueckspuelen") unsichtbar: sie kam schon immer ueber die Funkstrecke, wurde
+ * bei ready aber verworfen.
+ */
+void ui_status_set_idle_text(const char *text)
+{
+    if (!text || !text[0]) {
+        ui_status_set_idle();
+        return;
+    }
+    ESP_LOGD(TAG, "idle mit Text");
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", text);
 }
 
 void ui_status_set_idle_dimmed(bool dimmed)
@@ -454,8 +503,8 @@ void ui_status_set_recording(uint32_t session_id)
 
     _lock_acquire(&s_lvgl_lock);
     s_scene = UI_STATUS_ICON_RECORDING;
-    strlcpy(s_status_text, "Listening", sizeof(s_status_text));
-    strlcpy(s_hint_text, "Speak now", sizeof(s_hint_text));
+    strlcpy(s_status_text, "Hört zu", sizeof(s_status_text));
+    strlcpy(s_hint_text, "Sprich jetzt", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
 }
@@ -485,7 +534,7 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
 void ui_status_set_partial_text(const char *text)
 {
     ESP_LOGD(TAG, "partial: %s", text ? text : "");
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Thinking", text ? text : "");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Denkt nach", text ? text : "");
 }
 
 void ui_status_set_ota_progress(uint32_t written, uint32_t size)
@@ -496,16 +545,16 @@ void ui_status_set_ota_progress(uint32_t written, uint32_t size)
         percent = MIN(100, (written * 100) / size);
     }
     snprintf(hint, sizeof(hint), "%" PRIu32 "%%", percent);
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Updating", hint);
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Aktualisiert", hint);
 }
 
 void ui_status_set_ota_rebooting(void)
 {
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Rebooting", "Firmware updated");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Neustart", "Firmware aktualisiert");
 }
 
 void ui_status_set_error(const char *message)
 {
     ESP_LOGE(TAG, "%s", message ? message : "unknown error");
-    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unknown error");
+    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unbekannter Fehler");
 }
