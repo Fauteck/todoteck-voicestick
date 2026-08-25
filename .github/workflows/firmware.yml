@@ -16,6 +16,20 @@
 #                      Funkstrecke zerlegt und OTA nicht mehr greift:
 #                      `python -m esptool --chip esp32s3 write_flash 0x0 merged.bin`
 #                      Braucht nur esptool, keine Werkzeugkette.
+#
+# Beide Dateien liegen doppelt: als Artefakt (jeder Lauf, jeder Zweig, 90 Tage)
+# und — nur fuer `main` — als Anhang der rollenden Veroeffentlichung
+# `firmware-latest`. Der Unterschied ist der Abholweg. Ein Artefakt ist immer
+# ein ZIP und braucht selbst bei einem oeffentlichen Repo einen Token; ein
+# Release-Anhang ist eine einzelne Datei unter einer festen Adresse, die jeder
+# `curl` ohne Anmeldung zieht:
+#
+#   https://github.com/Fauteck/todoteck-voicestick/releases/download/firmware-latest/voice_stick.bin
+#
+# Daran haengt die Abholung auf dem Bueral-PC (`scripts/fetch-firmware.ps1` im
+# Todoteck-Repo), die die beiden Abbilder neben die APK in den geteilten
+# Google-Drive-Ordner legt. Ohne Token, weil dieser Fork oeffentlich ist — ein
+# Fork eines oeffentlichen Repos kann gar nicht privat sein.
 
 name: Firmware bauen
 
@@ -34,6 +48,9 @@ jobs:
   build:
     name: StickS3
     runs-on: ubuntu-latest
+    # Nur fuer den Release-Schritt unten. Ohne das darf `gh release` nichts.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -79,3 +96,51 @@ jobs:
           name: firmware-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
+
+      # ---- Rollende Veroeffentlichung `firmware-latest` (nur main) ----
+      #
+      # Zweck ist allein der token-freie Abholweg (siehe Kopf der Datei).
+      #
+      # Der Tag heisst bewusst NICHT `v*`: `release.yml` haengt an
+      # `push: tags: ["v*"]`, und diese Kette will hier niemand — sie prueft
+      # den Tag gegen VERSION, laedt nach Aliyun OSS und stoesst am Ende einen
+      # Website-Deploy im **Upstream** an.
+      #
+      # `--prerelease` sorgt dafuer, dass `/releases/latest/` weiterhin auf
+      # eine echte Version zeigt, falls `release.yml` je eine baut. Wer
+      # abholt, nennt ohnehin den festen Tag in der Adresse.
+      - name: Abbilder als `firmware-latest` veroeffentlichen
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/firmware-manifest.py"
+          {
+            echo "Automatisch aus \`main\` gebaut, Commit \`${GITHUB_SHA:0:7}\`."
+            echo "Rollend — dieser Tag zeigt immer auf den letzten gruenen Lauf aus \`main\`."
+            echo
+            echo "\`voice_stick.bin\` geht ueber Bluetooth aufs Geraet,"
+            echo "\`merged.bin\` ueber USB:"
+            echo '```'
+            echo "python -m esptool --chip esp32s3 write_flash 0x0 merged.bin"
+            echo '```'
+            echo
+            echo "\`firmware.json\` nennt Commit, Zeitpunkt, Groessen und SHA-256 —"
+            echo "daran erkennt der Abholer, ob sich das Herunterladen lohnt."
+          } > notes.md
+
+          # Loeschen und neu anlegen statt verschieben: `gh release edit` zieht
+          # einen bestehenden Tag nicht zuverlaessig auf den neuen Commit. Die
+          # Sekunde ohne Release nimmt niemand wahr; der Abholer laeuft nicht
+          # im Sekundentakt.
+          gh release delete firmware-latest --yes --cleanup-tag || true
+          gh release create firmware-latest \
+            --title "Firmware (main)" \
+            --notes-file notes.md \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            voice_stick.bin merged.bin firmware.json
+
+          echo "Veroeffentlicht: https://github.com/${GITHUB_REPOSITORY}/releases/tag/firmware-latest" >> "$GITHUB_STEP_SUMMARY"
