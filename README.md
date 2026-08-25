@@ -35,11 +35,46 @@ upstream code and untouched by this fork — see
 | Side button while idle shows the last answer again | The screen dims after 30 s and sleeps after 5 minutes; whoever looks later never read the answer |
 | Connection dot carries the real link state (filled green connected, empty ring disconnected) | It used to be derived from the scene, so a bridge dropping mid-screen was only noticed at the next attempt |
 | `device_name` control event overrides the advertised `VS-XXXX` in the header | With two sticks, the Todoteck name is the only way to tell which one is in your hand |
+| Tecki instead of the upstream cats: the Todoteck mark itself, given eyes, drawn from LVGL primitives | The cats said nothing about Todoteck. Drawing the mascot from shapes instead of six 112×112 ARGB8888 blobs frees **294 KB of flash** and makes the figure editable without re-rendering and committing images |
 | Firmware builds in GitHub Actions (`.github/workflows/firmware.yml`) | Nobody needs a local ESP-IDF toolchain to get a flashable image |
 
 Both protocol additions are optional in both directions: a bridge that does not
 know `recording_discarded` simply uploads the aborted take, and firmware that
 does not know `device_name` ignores it.
+
+### The Mascot
+
+Tecki is not a second drawing — he is the Todoteck mark plus a face layer
+computed from it. The geometry is normative and lives in the
+[Todoteck repository](https://github.com/Fauteck/todo/blob/main/docs/maskottchen.md);
+`ui_status_icons.c` derives everything from a single constant, `MARK_WIDTH`.
+
+Two things about him are decided here rather than there:
+
+- **Two greens.** `ui_status.c` paints a cream ground (`0xfff7ed`) in every
+  scene but `Ruht`, which goes dark (`0x1b2430`). The brand green `0x2ecc71`
+  reaches only 1.98:1 on cream — below the 3:1 WCAG asks for graphical
+  objects — so the light scenes use `0x1e9e56` (3.25:1) and only the resting
+  scene keeps `0x2ecc71` (7.45:1).
+- **101.5, not 112.** Three scenes tilt the figure around its bend, and
+  rotating about a point that is not the centre moves the bounding box. 101.5
+  is the widest the mark can be while all six poses stay inside the 112 px
+  square; wider and the tip in `Fehler` leaves the frame on the right.
+
+What he deliberately does not do: no blinking (440 mAh), no sound waves while
+recording (the level meter and the time bar are already there), no warning
+sign on error (the body turns red and the status line says so). A third signal
+for the same thing is noise.
+
+There is no speaking pose, because this firmware has no speaking state — the
+answer is shown as `Bereit` with text. That pose exists in the Todoteck
+repository and is waiting for text-to-speech.
+
+The three helper scripts in `scripts/` that built the cat sprites
+(`slice_cat_sprites.py`, `tune_cat_sprites.py`, `png_to_lvgl_argb_bin.py`)
+have no consumer any more. They are left in place on purpose: they are
+upstream tooling, and deleting them would only add conflicts the next time
+`upstream` is merged.
 
 ## Project Layout
 

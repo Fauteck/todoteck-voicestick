@@ -2,12 +2,5 @@ idf_component_register(
     SRCS "ui_status.c" "ui_status_icons.c"
          "fonts/todoteck_font_16.c" "fonts/todoteck_font_10.c"
     INCLUDE_DIRS "include" "."
-    EMBED_FILES
-        "assets/cat_pairing_argb8888.bin"
-        "assets/cat_ready_argb8888.bin"
-        "assets/cat_listening_argb8888.bin"
-        "assets/cat_thinking_argb8888.bin"
-        "assets/cat_resting_argb8888.bin"
-        "assets/cat_error_argb8888.bin"
     REQUIRES driver esp_driver_ledc esp_lcd esp_timer stick_s3_board lvgl
 )
