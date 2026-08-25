@@ -32,6 +32,11 @@ upstream code and untouched by this fork — see
 | Level meter during recording | Peak per frame, square-root compressed (raw speech sits near ten percent of full scale and would be invisible as a bar), with decay against flicker |
 | Remaining-time bar up to the 30 s limit | The limit exists anyway; at the limit the take is **sent**, not discarded — a sentence that ran that far beats nothing |
 | Side button aborts a running recording, screen shows `Abgebrochen` | Tearing the capture path down always emits a normal END audio frame, so the abort needs its own state event, `recording_discarded` |
+| A second press of the **front** button aborts the running recording as well | In hold-to-talk a second press cannot start a turn — the button would have had to come up first, and then no recording would be running. So it is either a lost release or an explicit "stop this", and both end the same way. The way out sits on the button already under the thumb instead of the one on the edge |
+| Hold really means hold: a press shorter than 500 ms is discarded on the device, screen shows `Zu kurz` | A tap started a recording exactly like a hold, so whoever started speaking afterwards spoke into a recording that had already ended. The bridge dropped those takes silently (`MIN_TURN_MILLIS`); the device now says so instead |
+| The recording never outlives the press: every 200 ms tick compares the GPIO against the recording state | The release arrives from an ISR callback through a twelve-slot queue. If it is lost, the take used to run to the 30 s limit with nobody speaking. The tick replays the missing event; two consecutive ticks are required so a single misread cannot cut a sentence |
+| Long text pushes Tecki off the screen instead of running through him | An answer like "Aufgabe angelegt: AliExpress Bestellung · Fällig: Di., 25.08.2026 · Projekt: Home Lab" needs seven lines on 119 px. They used to grow upwards from the bottom edge across the status line and straight through the figure. The decision is made on the measured text, not on the scene: if it fits below Tecki nothing changes, if it does not, Tecki steps aside and the text gets the whole screen in the largest font that fits |
+| Characters the fonts lack are substituted or dropped, not drawn as boxes | Bridge answers carry emoji (check mark, calendar, folder) and typographic punctuation. The emoji showed as empty rectangles mid-sentence and are removed together with the gap around them; dashes, curly quotes and ellipses are replaced with their ASCII equivalents, because dropping them would turn "Aufgabe – heute" into "Aufgabe heute" |
 | Side button while idle shows the last answer again | The screen dims after 30 s and sleeps after 5 minutes; whoever looks later never read the answer |
 | Connection dot carries the real link state (filled green connected, empty ring disconnected) | It used to be derived from the scene, so a bridge dropping mid-screen was only noticed at the next attempt |
 | `device_name` control event overrides the advertised `VS-XXXX` in the header | With two sticks, the Todoteck name is the only way to tell which one is in your hand |
@@ -91,11 +96,12 @@ upstream tooling, and deleting them would only add conflicts the next time
 ## Firmware Features
 
 - StickS3 advertises as `VS-XXXX`, where `XXXX` is derived from the last two bytes of the eFuse MAC. A `device_name` control event replaces that name in the header.
-- The front button maps to the protocol `primary` role; it starts a recording session on press and ends it on release once the host has put the device in `ready`.
+- The front button maps to the protocol `primary` role; it starts a recording session on press and ends it on release once the host has put the device in `ready`. A press shorter than 500 ms is discarded (`Zu kurz`), and a press while a recording is already running aborts it — both emit `recording_discarded`.
 - The firmware reads 16 kHz mono PCM from the ES8311 microphone, encodes it as Opus, and sends it over BLE notifications.
 - Recording is capped at 30 seconds. A bar counts the remaining time down; at zero the firmware sends the take like a normal button release.
 - The side button aborts a running recording, emits `recording_discarded`, shows `Abgebrochen` and plays the discard tone.
-- The screen shows pairing, ready, listening (`Hört zu`), thinking (`Denkt nach`), pending confirmation, error and battery states from host-sent `ui_state` updates. Text arriving with `ready` is rendered as the answer and kept for recall (up to 192 bytes; the display wraps and clips it).
+- The screen shows pairing, ready, listening (`Hört zu`), thinking (`Denkt nach`), pending confirmation, error and battery states from host-sent `ui_state` updates. Text arriving with `ready` is rendered as the answer and kept for recall (up to 192 bytes).
+- Text that does not fit below Tecki takes the whole screen and Tecki is hidden for as long as it is shown; the font is the largest of the two that fits, and anything beyond that ends in an ellipsis. Characters outside the fonts' Latin-1 range are replaced with ASCII where an equivalent exists and dropped otherwise.
 - The screen dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
 - BLE OTA updates over the two 3 MB app slots of the OTA partition table.
 
@@ -106,7 +112,7 @@ while the capture path is up. That is why the start tone is played *before*
 ## Hardware Target
 
 - Board: M5Stack StickS3 / ESP32-S3-PICO-1-N8R8
-- Front button: GPIO11, protocol `primary`, push-to-talk and deep-sleep wake
+- Front button: GPIO11, protocol `primary`, push-to-talk, abort on a second press, and deep-sleep wake
 - Side button: GPIO12, protocol `secondary`, abort, cancel, or recall the last answer
 - PMIC IRQ: GPIO13
 - Audio codec: ES8311 over I2S, 16 kHz / 16 bit / mono, speaker on the same lines
@@ -120,8 +126,8 @@ Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s
 | State | Front button | Side button |
 | --- | --- | --- |
 | Unpaired / disconnected | No recording; screen shows `VS-XXXX` | No effective action |
-| Connected idle | Hold to record | Show the last answer again on the device; the click still reaches the host, where the upstream app restores the last input confirmation |
-| Recording | Release to finish recording | Abort the recording, nothing is sent |
+| Connected idle | Hold to record — a press under 500 ms is discarded with `Zu kurz` | Show the last answer again on the device; the click still reaches the host, where the upstream app restores the last input confirmation |
+| Recording | Release to finish recording; press again to abort it, nothing is sent | Abort the recording, nothing is sent |
 | Thinking / finalizing | New recording is ignored | Cancel the in-progress recognition |
 | Pending confirmation countdown | Pause auto-paste and keep pending confirmation | Cancel pending text |
 | Manual pending confirmation | Confirm paste | Cancel pending text |

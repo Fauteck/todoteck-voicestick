@@ -42,6 +42,17 @@ static const char *TAG = "voice_stick";
 #define RECORDING_MAX_MS (30 * 1000)
 #define RECORDING_TICK_MS 200
 #define RECORDING_TICK_US (RECORDING_TICK_MS * 1000ULL)
+/*
+ * Wie lange die vordere Taste mindestens gehalten werden muss, damit die
+ * Aufnahme zaehlt. Derselbe Wert wie MIN_TURN_MILLIS in der Bruecke
+ * (VoiceBridgeService.kt): Kuerzeres wirft die ohnehin weg, dann soll das
+ * Geraet es gleich selbst tun — und es sagen, statt stumm nichts zu liefern.
+ *
+ * Der Anlass: Ein Antippen startete die Aufnahme wie ein Halten, und wer
+ * danach zu sprechen anfing, sprach ins Leere. "Halten zum Sprechen" steht
+ * seit jeher auf dem Schirm; jetzt stimmt es auch.
+ */
+#define PRIMARY_MIN_HOLD_MS 500
 /* Wie lange der Abbruch-Ton auf den Abbau des Aufnahmepfads wartet. */
 #define CANCEL_TONE_WAIT_MS 600
 
@@ -59,6 +70,10 @@ static esp_timer_handle_t s_battery_refresh_timer;
 static esp_timer_handle_t s_host_response_timer;
 static esp_timer_handle_t s_recording_tick_timer;
 static int64_t s_recording_started_us;
+/* Wieviele Aufnahme-Takte hintereinander die Taste los gemeldet haben. */
+static uint8_t s_release_ticks;
+/* Wann der Pin das Loslassen zuerst meldete, falls das Ereignis ausblieb. */
+static int64_t s_primary_release_us;
 /*
  * Der Name aus Todoteck, sobald die Bruecke ihn geschickt hat. Er ueberlebt
  * einen Verbindungsabbruch — sonst stuende beim naechsten Blick wieder
@@ -462,6 +477,8 @@ static uint32_t start_recording(void)
     s_recording = true;
     s_app_ui_state = APP_UI_STATE_RECORDING;
     s_recording_started_us = esp_timer_get_time();
+    s_release_ticks = 0;
+    s_primary_release_us = 0;
     restart_display_dim_timer();
     restart_deep_sleep_timer();
     ui_status_set_recording(session_id);
@@ -484,6 +501,39 @@ static uint32_t stop_recording(void)
     restart_display_dim_timer();
     restart_deep_sleep_timer();
     return session_id;
+}
+
+/*
+ * Bricht die laufende Aufnahme ab: nichts geht an Todoteck, das Geraet ist
+ * sofort wieder bereit.
+ *
+ * Das Ereignis geht vor dem Ende-Rahmen raus, den der Abbau des
+ * Aufnahmepfads ohnehin schickt — sonst waere der Abbruch fuer die Bruecke
+ * nicht von einem normalen Ende zu unterscheiden und die Aufnahme ginge
+ * trotzdem an Todoteck.
+ */
+static void abort_recording(void)
+{
+    const uint32_t cancelled = stop_recording();
+    (void)voice_ble_send_recording_discarded(cancelled);
+    s_primary_down_us = 0;
+    s_primary_release_us = 0;
+    s_primary_session_id = 0;
+    s_app_ui_state = APP_UI_STATE_READY;
+}
+
+/*
+ * Der Abbau des Aufnahmepfads laeuft in eigenen Tasks und gibt die
+ * I2S-Leitungen erst nach dem Leeren der Warteschlange frei. Kurz darauf
+ * warten, sonst faellt genau der Ton aus, der den Abbruch quittieren soll.
+ */
+static void play_cancel_tone(void)
+{
+    for (int waited = 0; waited < CANCEL_TONE_WAIT_MS && audio_pipeline_is_busy();
+         waited += 20) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    play_tone(AUDIO_TONE_CANCEL);
 }
 
 static void queue_app_event(app_event_type_t type)
@@ -640,6 +690,23 @@ static uint32_t elapsed_button_ms(int64_t down_us)
     return (uint32_t)(elapsed_us / 1000);
 }
 
+/*
+ * Wie lange die vordere Taste wirklich unten war.
+ *
+ * Kam das Loslassen ueber den Abgleich im Aufnahme-Takt statt als Ereignis,
+ * zaehlt der Zeitpunkt, an dem der Pin es zuerst gemeldet hat. Sonst zaehlte
+ * die Verzoegerung des Abgleichs mit — und ein Antippen rutschte damit ueber
+ * die Mindesthaltedauer, also genau an der Regel vorbei, die es abfangen
+ * soll.
+ */
+static uint32_t primary_hold_ms(void)
+{
+    if (s_primary_release_us > 0 && s_primary_release_us > s_primary_down_us) {
+        return (uint32_t)((s_primary_release_us - s_primary_down_us) / 1000);
+    }
+    return elapsed_button_ms(s_primary_down_us);
+}
+
 static void apply_app_ui_state(const char *state, const char *text)
 {
     ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
@@ -732,6 +799,25 @@ static void app_event_task(void *arg)
         case APP_EVENT_FRONT_DOWN:
             ESP_LOGI(TAG, "button front down");
             note_activity();
+            if (s_interaction_mode == INTERACTION_MODE_HOLD_TO_TALK && s_recording) {
+                /*
+                 * Zweiter Druck auf dieselbe Taste, waehrend die Aufnahme
+                 * laeuft: Abbruch.
+                 *
+                 * Im Halten-Modus kann das gar nicht der Anfang eines neuen
+                 * Turns sein — dafuer muesste die Taste zwischendurch los
+                 * gewesen sein, und dann liefe keine Aufnahme mehr. Es ist
+                 * also entweder ein verlorengegangenes Loslassen oder der
+                 * ausdrueckliche Wunsch aufzuhoeren. Beides endet hier gleich,
+                 * und der Ausweg liegt auf der Taste, die man ohnehin schon
+                 * unter dem Daumen hat, statt auf der an der Kante.
+                 */
+                ESP_LOGI(TAG, "zweiter Druck bei laufender Aufnahme -> Abbruch");
+                abort_recording();
+                ui_status_set_cancelled();
+                play_cancel_tone();
+                break;
+            }
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK && s_recording) {
                 const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
                 s_primary_session_id = stop_recording();
@@ -774,7 +860,15 @@ static void app_event_task(void *arg)
             if (!s_recording && s_primary_session_id == 0 && s_primary_down_us == 0) {
                 break;
             }
-            const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
+            const uint32_t primary_duration_ms = primary_hold_ms();
+            if (s_recording && primary_duration_ms < PRIMARY_MIN_HOLD_MS) {
+                ESP_LOGI(TAG, "Druck zu kurz (%u ms) -> verworfen",
+                         (unsigned)primary_duration_ms);
+                abort_recording();
+                ui_status_set_press_too_short();
+                play_cancel_tone();
+                break;
+            }
             if (s_recording) {
                 s_primary_session_id = stop_recording();
             }
@@ -784,6 +878,7 @@ static void app_event_task(void *arg)
                 apply_app_ui_state("ready", "");
             }
             s_primary_down_us = 0;
+            s_primary_release_us = 0;
             s_primary_session_id = 0;
             break;
         case APP_EVENT_SIDE_DOWN:
@@ -798,31 +893,10 @@ static void app_event_task(void *arg)
             s_secondary_down_us = 0;
 
             if (s_recording) {
-                /*
-                 * Abbruch. Das Ereignis geht vor dem Ende-Rahmen raus, den
-                 * der Abbau des Aufnahmepfads ohnehin schickt — sonst waere
-                 * der Abbruch fuer die Bruecke nicht von einem normalen Ende
-                 * zu unterscheiden und die Aufnahme ginge trotzdem an
-                 * Todoteck.
-                 */
-                const uint32_t cancelled = stop_recording();
-                (void)voice_ble_send_recording_discarded(cancelled);
-                s_primary_down_us = 0;
-                s_primary_session_id = 0;
-                s_app_ui_state = APP_UI_STATE_READY;
+                /* Abbruch, wie beim zweiten Druck auf die vordere Taste. */
+                abort_recording();
                 ui_status_set_cancelled();
-                /*
-                 * Der Abbau des Aufnahmepfads laeuft in eigenen Tasks und
-                 * gibt die I2S-Leitungen erst nach dem Leeren der
-                 * Warteschlange frei. Kurz darauf warten, sonst faellt genau
-                 * der Ton aus, der den Abbruch quittieren soll.
-                 */
-                for (int waited = 0;
-                     waited < CANCEL_TONE_WAIT_MS && audio_pipeline_is_busy();
-                     waited += 20) {
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                }
-                play_tone(AUDIO_TONE_CANCEL);
+                play_cancel_tone();
                 break;
             }
 
@@ -905,6 +979,43 @@ static void app_event_task(void *arg)
                 stop_recording_tick();
                 break;
             }
+            if (s_interaction_mode == INTERACTION_MODE_HOLD_TO_TALK &&
+                s_primary_session_id != 0) {
+                /*
+                 * Zwei Takte statt einem: ein einzelner Ausreisser beim Lesen
+                 * des Pins wuerde sonst mitten im Satz abschneiden. 400 ms
+                 * merkt beim Loslassen niemand, ein Fehlschnitt sehr wohl.
+                 */
+                if (stick_s3_front_button_pressed()) {
+                    s_release_ticks = 0;
+                    s_primary_release_us = 0;
+                } else {
+                    if (s_release_ticks == 0) {
+                        s_primary_release_us = esp_timer_get_time();
+                    }
+                    s_release_ticks++;
+                }
+                if (s_release_ticks >= 2) {
+                    /*
+                     * Halten heisst halten, zweiter Teil: Die Taste ist los,
+                     * die Aufnahme laeuft aber noch — dann ist das
+                     * Loslassen-Ereignis unterwegs verlorengegangen (es kommt
+                     * aus einem ISR-Callback ueber eine Warteschlange mit
+                     * zwoelf Plaetzen). Ohne diesen Abgleich liefe die
+                     * Aufnahme bis zur 30-Sekunden-Grenze weiter, obwohl
+                     * niemand mehr spricht — und genau so hat es sich am
+                     * Handgelenk angefuehlt.
+                     *
+                     * Der Abgleich stellt kein eigenes Verhalten dar: er
+                     * stellt dasselbe Ereignis nach, das gefehlt hat.
+                     */
+                    ESP_LOGW(TAG, "Taste ist los, Aufnahme laeuft noch -> beenden");
+                    s_release_ticks = 0;
+                    queue_app_event(APP_EVENT_FRONT_UP);
+                    break;
+                }
+            }
+
             const uint32_t elapsed_ms = elapsed_button_ms(s_recording_started_us);
             const uint8_t remaining = elapsed_ms >= RECORDING_MAX_MS
                 ? 0

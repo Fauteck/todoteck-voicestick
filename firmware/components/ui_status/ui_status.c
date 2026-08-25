@@ -58,6 +58,19 @@ static const char *TAG = "ui_status";
 LV_FONT_DECLARE(todoteck_font_16);
 LV_FONT_DECLARE(todoteck_font_10);
 
+/*
+ * Wofuer der untere Text steht — und damit, wieviel Flaeche er bekommt.
+ *
+ * `UI_TEXT_HINT` ist Beiwerk ("Halten zum Sprechen", der Geraetename beim
+ * Koppeln): klein, gedaempft, unter Tecki. `UI_TEXT_MESSAGE` ist die Auskunft
+ * selbst — die Antwort der Bruecke, ein Zwischenstand, eine Fehlermeldung.
+ * Die gibt es nur einmal, und sie muss lesbar sein.
+ */
+typedef enum {
+    UI_TEXT_HINT,
+    UI_TEXT_MESSAGE,
+} ui_text_kind_t;
+
 #define UI_STATUS_TEXT_MAX 32
 #define UI_HINT_TEXT_MAX 192
 
@@ -79,6 +92,8 @@ static lv_obj_t *s_time_track;
 static lv_obj_t *s_time_fill;
 static ui_status_icons_t s_icons;
 static ui_status_icon_scene_t s_scene = UI_STATUS_ICON_BOOT;
+/* Beiwerk oder Auskunft — entscheidet ueber Schriftgroesse und Platz. */
+static ui_text_kind_t s_text_kind = UI_TEXT_HINT;
 static char s_status_text[UI_STATUS_TEXT_MAX] = "Startet";
 static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
 static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Halten zum Sprechen";
@@ -238,6 +253,71 @@ static void create_meters(lv_obj_t *screen)
     lv_obj_align(s_time_fill, LV_ALIGN_LEFT_MID, 0, 0);
 }
 
+/*
+ * Layoutmasse im Inhaltsbereich: 135x240 abzueglich 8 Pixel Rand ringsum.
+ */
+#define CONTENT_W (LCD_H_RES - 16)
+#define CONTENT_H (LCD_V_RES - 16)
+#define TEXT_BOTTOM_Y (CONTENT_H - 10)
+#define STATUS_Y_WITH_TECKI 168
+#define STATUS_Y_TEXT_ONLY 18
+#define TEXT_GAP 6
+#define TEXT_LINE_SPACE 2
+
+typedef struct {
+    bool tecki;             /* bleibt die Figur stehen? */
+    const lv_font_t *font;  /* Schrift des unteren Texts */
+    int32_t status_y;       /* Oberkante der Statuszeile */
+} text_layout_t;
+
+static int32_t text_height(const char *text, const lv_font_t *font)
+{
+    lv_point_t size;
+    lv_text_get_size(&size, text ? text : "", font, 0, TEXT_LINE_SPACE, CONTENT_W,
+                     LV_TEXT_FLAG_NONE);
+    return size.y;
+}
+
+/*
+ * Wo Statuszeile und Text hinkommen — und ob Tecki dabei stehen bleibt.
+ *
+ * Der Anlass steht auf einem Foto vom Handgelenk: "Aufgabe angelegt:
+ * AliExpress Bestellung · Faellig: Di., 25.08.2026 · Projekt: Home Lab"
+ * braucht auf 119 Pixel Breite sieben Zeilen. Die wuchsen vom unteren Rand
+ * nach oben ueber die Statuszeile und mitten durch die Figur hindurch —
+ * lesbar war danach weder das eine noch das andere.
+ *
+ * Die Entscheidung faellt deshalb am gemessenen Text, nicht an der Szene:
+ * Passt er unter Tecki, bleibt alles wie gehabt. Passt er nicht, weicht
+ * Tecki. Er sagt ohnehin dasselbe wie die Statuszeile daneben; der Text sagt
+ * etwas, das es nur einmal gibt.
+ */
+static text_layout_t plan_text_layout(const char *status, const char *text, ui_text_kind_t kind)
+{
+    const int32_t status_h = status && status[0] ? todoteck_font_16.line_height : 0;
+    const int32_t room_under_tecki = TEXT_BOTTOM_Y - (STATUS_Y_WITH_TECKI + status_h);
+
+    /* Eine Auskunft, die in eine Zeile passt, darf gross bleiben. */
+    if (kind == UI_TEXT_MESSAGE && text_height(text, &todoteck_font_16) <= room_under_tecki) {
+        return (text_layout_t){ true, &todoteck_font_16, STATUS_Y_WITH_TECKI };
+    }
+    if (text_height(text, &todoteck_font_10) <= room_under_tecki) {
+        return (text_layout_t){ true, &todoteck_font_10, STATUS_Y_WITH_TECKI };
+    }
+
+    /*
+     * Ohne Figur: Statuszeile nach oben unter die Kopfzeile, der Rest gehoert
+     * dem Text. Die Zeile wird immer eingerechnet, auch wenn sie gerade leer
+     * ist — sonst spraenge das Layout, sobald sie doch etwas traegt.
+     */
+    const int32_t top = STATUS_Y_TEXT_ONLY + todoteck_font_16.line_height + TEXT_GAP;
+    const int32_t room_full = TEXT_BOTTOM_Y - top;
+    const lv_font_t *font = text_height(text, &todoteck_font_16) <= room_full
+                                ? &todoteck_font_16
+                                : &todoteck_font_10;
+    return (text_layout_t){ false, font, STATUS_Y_TEXT_ONLY };
+}
+
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
 {
     if (!s_ready) {
@@ -246,23 +326,48 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     ui_status_icons_apply(&s_icons, scene);
 
-    lv_label_set_text(s_status_label, status);
-    lv_label_set_text(s_hint_label, hint ? hint : "");
-    if (scene == UI_STATUS_ICON_ERROR) {
-        lv_obj_set_height(s_hint_label, 42);
-        lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
-        lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
-    } else {
+    const char *body_text = hint ? hint : "";
+    const text_layout_t plan = plan_text_layout(status, body_text, s_text_kind);
+
+    /*
+     * Ohne Tecki traegt die Statuszeile allein, dass etwas schiefging — die
+     * Fehlerszene laesst sie sonst absichtlich leer, weil die rote Figur mit
+     * den Kreuzaugen es sagt. Ist die weg, muss es jemand anderes sagen.
+     */
+    const char *status_shown = status ? status : "";
+    if (!plan.tecki && !status_shown[0] && scene == UI_STATUS_ICON_ERROR) {
+        status_shown = "Fehler";
+    }
+
+    ui_status_icons_show(&s_icons, plan.tecki);
+    lv_label_set_text(s_status_label, status_shown);
+    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, plan.status_y);
+
+    lv_label_set_text(s_hint_label, body_text);
+    lv_obj_set_style_text_font(s_hint_label, plan.font, 0);
+    if (plan.tecki) {
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+    } else {
+        /*
+         * Feste Hoehe mit LV_LABEL_LONG_DOT: Was selbst in der kleinen
+         * Schrift nicht mehr auf den Schirm passt, endet mit Auslassungs-
+         * punkten statt mitten im Wort abgeschnitten zu sein.
+         */
+        const int32_t top = plan.status_y + todoteck_font_16.line_height + TEXT_GAP;
+        lv_obj_set_height(s_hint_label, TEXT_BOTTOM_Y - top);
+        lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(s_hint_label, LV_ALIGN_TOP_MID, 0, top);
     }
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
     const bool error = scene == UI_STATUS_ICON_ERROR;
     const bool recording = scene == UI_STATUS_ICON_RECORDING;
 
-    if (recording) {
+    if (recording && plan.tecki) {
         lv_obj_remove_flag(s_meter_track, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -291,7 +396,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, text, 0);
-    lv_obj_set_style_text_color(s_hint_label, hint_color, 0);
+    lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     lv_obj_set_style_text_color(s_battery_label, muted, 0);
     lv_obj_set_style_border_color(s_battery_shell, muted, 0);
     lv_obj_set_style_bg_color(s_battery_tip, muted, 0);
@@ -302,7 +407,10 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 static void render_current_locked(void)
 {
     if (s_dimmed) {
+        const ui_text_kind_t kind = s_text_kind;
+        s_text_kind = UI_TEXT_HINT;
         render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "");
+        s_text_kind = kind;
     } else {
         render_scene_locked(s_scene, s_status_text, s_hint_text);
     }
@@ -340,6 +448,7 @@ static void create_status_ui(void)
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_line_space(s_hint_label, TEXT_LINE_SPACE, 0);
     lv_obj_set_width(s_hint_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x7f7180), 0);
@@ -350,33 +459,157 @@ static void create_status_ui(void)
     render_current_locked();
 }
 
+static size_t utf8_decode(const unsigned char *p, uint32_t *codepoint)
+{
+    if (p[0] < 0x80) {
+        *codepoint = p[0];
+        return 1;
+    }
+    if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+        return 2;
+    }
+    if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) |
+                     (p[2] & 0x3F);
+        return 3;
+    }
+    if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+        (p[3] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
+                     ((uint32_t)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+        return 4;
+    }
+    /* Kaputtes Byte: eins weiter, sonst kaeme die Schleife nicht voran. */
+    *codepoint = 0xFFFD;
+    return 1;
+}
+
 /*
- * Wie strlcpy, schneidet aber nie mitten in ein UTF-8-Zeichen. Ein halbierter
- * Umlaut ergaebe auf dem Display ein Kaestchen — und die Texte kommen von
- * aussen, sind also nicht vorhersehbar lang.
+ * Deckungsbereich der beiden Schriften: ASCII ab dem Leerzeichen und Latin-1
+ * ohne dessen Steuerbereich. Steht als Bedingung hier, weil die Alternative
+ * — jede Schrift nach jedem Zeichen fragen — teurer ist als die zwei
+ * Vergleiche und dasselbe Ergebnis liefert.
  */
-static void copy_utf8_clipped(char *dst, const char *src, size_t size)
+static bool font_has_codepoint(uint32_t codepoint)
+{
+    return (codepoint >= 32 && codepoint <= 126) ||
+           (codepoint >= 160 && codepoint <= 172) ||
+           (codepoint >= 174 && codepoint <= 255);
+}
+
+/*
+ * Typografie, die keine der beiden Schriften enthaelt, die aber in jedem Text
+ * von draussen steckt: Gedankenstrich, typografische Anfuehrungszeichen,
+ * Auslassungspunkte. Ersatzlos zu streichen ergaebe "Aufgabe heute" statt
+ * "Aufgabe - heute" — der ASCII-Ersatz sagt dasselbe wie das Original.
+ */
+static const char *ascii_substitute(uint32_t codepoint)
+{
+    switch (codepoint) {
+    case 0x2010: /* Bindestrich */
+    case 0x2011:
+    case 0x2012:
+    case 0x2013: /* Halbgeviertstrich */
+    case 0x2014: /* Geviertstrich */
+    case 0x2015:
+    case 0x2212: /* Minus */
+        return "-";
+    case 0x2018:
+    case 0x2019:
+    case 0x201A:
+    case 0x201B:
+        return "'";
+    case 0x201C:
+    case 0x201D:
+    case 0x201E:
+    case 0x201F:
+        return "\"";
+    case 0x2022: /* Aufzaehlungspunkt */
+    case 0x2027:
+        return "·";
+    case 0x2026: /* Auslassungspunkte */
+        return "...";
+    case 0x2192: /* Pfeil */
+        return "->";
+    default:
+        return NULL;
+    }
+}
+
+/*
+ * Kopiert Text so, wie das Display ihn zeigen kann: hoechstens `size - 1`
+ * Byte, nie mitten in ein UTF-8-Zeichen — und ohne Zeichen, die die Schrift
+ * nicht kennt.
+ *
+ * Beide Regeln stammen aus der Praxis. `strlcpy` schnitte einen Umlaut an der
+ * Bytegrenze mittendurch; LVGL laeuft beim Dekodieren dann ins Leere. Und die
+ * Antworten der Bruecke tragen Emoji ("Aufgabe angelegt · Faellig: ..." kommt
+ * mit Haken-, Kalender- und Ordnersymbol an), die keine der beiden Schriften
+ * enthaelt: Auf dem Geraet standen dort leere Rechtecke mitten im Satz. Sie
+ * fliegen raus, samt der Luecke, die sie hinterlassen — sonst bliebe der
+ * doppelte Abstand stehen, den sie umgab.
+ */
+static void copy_utf8_display(char *dst, const char *src, size_t size)
 {
     if (size == 0) {
         return;
     }
-    size_t len = strlen(src);
-    if (len >= size) {
-        len = size - 1;
-        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) {
-            len--;
+    size_t out = 0;
+    bool pending_space = false;
+    const unsigned char *p = (const unsigned char *)(src ? src : "");
+
+    while (*p != '\0') {
+        uint32_t codepoint = 0;
+        const size_t len = utf8_decode(p, &codepoint);
+        const unsigned char *start = p;
+        p += len;
+
+        if (codepoint == '\n') {
+            if (out + 1 >= size) {
+                break;
+            }
+            dst[out++] = '\n';
+            pending_space = false;
+            continue;
         }
+        /* 0x00A0 ist ein Leerzeichen, auch wenn die Schrift es kennt. */
+        if (codepoint == ' ' || codepoint == '\t' || codepoint == 0x00A0) {
+            pending_space = out > 0;
+            continue;
+        }
+
+        const char *substitute = NULL;
+        if (!font_has_codepoint(codepoint)) {
+            substitute = ascii_substitute(codepoint);
+            if (substitute == NULL) {
+                continue;
+            }
+        }
+        const char *from = substitute ? substitute : (const char *)start;
+        const size_t bytes = substitute ? strlen(substitute) : len;
+
+        if (out + (pending_space ? 1 : 0) + bytes + 1 > size) {
+            break;
+        }
+        if (pending_space) {
+            dst[out++] = ' ';
+            pending_space = false;
+        }
+        memcpy(dst + out, from, bytes);
+        out += bytes;
     }
-    memcpy(dst, src, len);
-    dst[len] = '\0';
+    dst[out] = '\0';
 }
 
-static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint)
+static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint,
+                      ui_text_kind_t kind)
 {
     _lock_acquire(&s_lvgl_lock);
     s_scene = scene;
-    copy_utf8_clipped(s_status_text, status ? status : "", sizeof(s_status_text));
-    copy_utf8_clipped(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
+    s_text_kind = kind;
+    copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
+    copy_utf8_display(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
 }
@@ -514,7 +747,7 @@ void ui_status_prepare_deep_sleep(void)
 
 void ui_status_set_device_name(const char *device_name)
 {
-    copy_utf8_clipped(s_device_name, device_name && device_name[0] ? device_name : "BLE",
+    copy_utf8_display(s_device_name, device_name && device_name[0] ? device_name : "BLE",
                       sizeof(s_device_name));
 
     _lock_acquire(&s_lvgl_lock);
@@ -527,22 +760,23 @@ void ui_status_set_device_name(const char *device_name)
 void ui_status_set_advertising(void)
 {
     ESP_LOGD(TAG, "advertising");
-    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", "Brücke starten");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", "Brücke starten", UI_TEXT_HINT);
 }
 
 void ui_status_set_pairing(const char *device_name)
 {
     ESP_LOGD(TAG, "pairing %s", device_name ? device_name : "");
     ui_status_set_device_name(device_name);
-    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", device_name ? device_name : "VS-0000");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", device_name ? device_name : "VS-0000",
+              UI_TEXT_HINT);
 }
 
 void ui_status_set_idle_hint(const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
-    copy_utf8_clipped(s_idle_hint_text, hint && hint[0] ? hint : "Halten zum Sprechen", sizeof(s_idle_hint_text));
+    copy_utf8_display(s_idle_hint_text, hint && hint[0] ? hint : "Halten zum Sprechen", sizeof(s_idle_hint_text));
     if (s_scene == UI_STATUS_ICON_IDLE) {
-        copy_utf8_clipped(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
+        copy_utf8_display(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
         render_current_locked();
     }
     _lock_release(&s_lvgl_lock);
@@ -551,7 +785,7 @@ void ui_status_set_idle_hint(const char *hint)
 void ui_status_set_idle(void)
 {
     ESP_LOGD(TAG, "idle");
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_idle_hint_text);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_idle_hint_text, UI_TEXT_HINT);
 }
 
 /*
@@ -571,9 +805,9 @@ void ui_status_set_idle_text(const char *text)
     }
     ESP_LOGD(TAG, "idle mit Text");
     _lock_acquire(&s_lvgl_lock);
-    copy_utf8_clipped(s_last_answer, text, sizeof(s_last_answer));
+    copy_utf8_display(s_last_answer, text, sizeof(s_last_answer));
     _lock_release(&s_lvgl_lock);
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", text);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", text, UI_TEXT_MESSAGE);
 }
 
 /*
@@ -591,11 +825,11 @@ void ui_status_show_last_answer(void)
     _lock_release(&s_lvgl_lock);
 
     if (!have) {
-        set_scene(UI_STATUS_ICON_IDLE, "Bereit", "Noch keine Antwort");
+        set_scene(UI_STATUS_ICON_IDLE, "Bereit", "Noch keine Antwort", UI_TEXT_HINT);
         return;
     }
     ESP_LOGD(TAG, "letzte Antwort erneut");
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_last_answer);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_last_answer, UI_TEXT_MESSAGE);
 }
 
 /*
@@ -606,7 +840,19 @@ void ui_status_show_last_answer(void)
 void ui_status_set_cancelled(void)
 {
     ESP_LOGI(TAG, "abgebrochen");
-    set_scene(UI_STATUS_ICON_IDLE, "Abgebrochen", "Nichts gesendet");
+    set_scene(UI_STATUS_ICON_IDLE, "Abgebrochen", "Nichts gesendet", UI_TEXT_HINT);
+}
+
+/*
+ * Ein Druck, der zu kurz war, um etwas zu sagen: die Aufnahme wird verworfen,
+ * nichts geht an Todoteck. Die Zeile sagt gleich, was stattdessen zu tun ist —
+ * "Abgebrochen" allein liesse offen, warum.
+ */
+void ui_status_set_press_too_short(void)
+{
+    ESP_LOGI(TAG, "Druck zu kurz");
+    set_scene(UI_STATUS_ICON_IDLE, "Zu kurz", "Taste halten, solange du sprichst",
+              UI_TEXT_HINT);
 }
 
 /*
@@ -667,6 +913,7 @@ void ui_status_set_recording(uint32_t session_id)
 
     _lock_acquire(&s_lvgl_lock);
     s_scene = UI_STATUS_ICON_RECORDING;
+    s_text_kind = UI_TEXT_HINT;
     strlcpy(s_status_text, "Hört zu", sizeof(s_status_text));
     strlcpy(s_hint_text, "Sprich jetzt", sizeof(s_hint_text));
     render_current_locked();
@@ -698,7 +945,7 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
 void ui_status_set_partial_text(const char *text)
 {
     ESP_LOGD(TAG, "partial: %s", text ? text : "");
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Denkt nach", text ? text : "");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Denkt nach", text ? text : "", UI_TEXT_MESSAGE);
 }
 
 void ui_status_set_ota_progress(uint32_t written, uint32_t size)
@@ -709,16 +956,17 @@ void ui_status_set_ota_progress(uint32_t written, uint32_t size)
         percent = MIN(100, (written * 100) / size);
     }
     snprintf(hint, sizeof(hint), "%" PRIu32 "%%", percent);
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Aktualisiert", hint);
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Aktualisiert", hint, UI_TEXT_HINT);
 }
 
 void ui_status_set_ota_rebooting(void)
 {
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Neustart", "Firmware aktualisiert");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Neustart", "Firmware aktualisiert", UI_TEXT_HINT);
 }
 
 void ui_status_set_error(const char *message)
 {
     ESP_LOGE(TAG, "%s", message ? message : "unknown error");
-    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unbekannter Fehler");
+    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unbekannter Fehler",
+              UI_TEXT_MESSAGE);
 }
