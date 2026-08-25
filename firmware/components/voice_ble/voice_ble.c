@@ -917,6 +917,16 @@ esp_err_t voice_ble_send_device_info(void)
     return send_state_json(json);
 }
 
+esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)
+{
+    char json[96];
+    snprintf(json, sizeof(json),
+             "{\"event\":\"recording_discarded\",\"session_id\":%" PRIu32 "}",
+             session_id);
+    ESP_LOGI(TAG, "recording discarded session=%" PRIu32, session_id);
+    return send_state_json(json);
+}
+
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id)
 {
     char json[96];

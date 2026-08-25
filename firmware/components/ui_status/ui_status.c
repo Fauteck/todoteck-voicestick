@@ -49,8 +49,17 @@ static const char *TAG = "ui_status";
 #define LCD_BACKLIGHT_LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LCD_BACKLIGHT_LEDC_TIMER LEDC_TIMER_0
 #define LCD_BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
+/*
+ * Eigene Schriften statt der eingebauten LVGL-Montserrat: die bringen nur
+ * ASCII mit, "Rueckspuelen" erschiene also mit Luecken. Diese hier sind mit
+ * lv_font_conv aus Montserrat erzeugt und decken zusaetzlich Latin-1 ab,
+ * also Umlaute und Eszett.
+ */
+LV_FONT_DECLARE(todoteck_font_16);
+LV_FONT_DECLARE(todoteck_font_10);
+
 #define UI_STATUS_TEXT_MAX 32
-#define UI_HINT_TEXT_MAX 96
+#define UI_HINT_TEXT_MAX 192
 
 static _lock_t s_lvgl_lock;
 static bool s_ready;
@@ -64,13 +73,31 @@ static lv_obj_t *s_battery_shell;
 static lv_obj_t *s_battery_fill;
 static lv_obj_t *s_battery_tip;
 static lv_obj_t *s_battery_label;
+static lv_obj_t *s_meter_track;
+static lv_obj_t *s_meter_fill;
+static lv_obj_t *s_time_track;
+static lv_obj_t *s_time_fill;
 static ui_status_icons_t s_icons;
 static ui_status_icon_scene_t s_scene = UI_STATUS_ICON_BOOT;
-static char s_status_text[UI_STATUS_TEXT_MAX] = "Booting";
-static char s_hint_text[UI_HINT_TEXT_MAX] = "Starting up";
-static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Hold to Talk";
-static char s_device_name[16] = "BLE";
+static char s_status_text[UI_STATUS_TEXT_MAX] = "Startet";
+static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
+static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Halten zum Sprechen";
+static char s_device_name[24] = "BLE";
 static bool s_dimmed;
+/*
+ * Der Verbindungszustand kam bisher aus der Szene: "Koppeln" faerbte den
+ * Punkt blau, alles andere gruen. Das log, sobald die Bruecke waehrend einer
+ * Anzeige wegbrach — man sah es erst beim naechsten Sprechversuch. Jetzt
+ * traegt der Punkt den echten Zustand, unabhaengig davon, was auf dem
+ * Display steht.
+ */
+static bool s_link_connected;
+/*
+ * Die letzte Antwort ueberlebt den Bildschirmwechsel: nach Ruhezustand oder
+ * Fehler ist sie sonst weg, obwohl man sie vielleicht nur nicht rechtzeitig
+ * gelesen hat. Die Seitentaste holt sie zurueck.
+ */
+static char s_last_answer[UI_HINT_TEXT_MAX];
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -152,11 +179,63 @@ static void create_battery_ui(lv_obj_t *screen)
     s_battery_label = lv_label_create(screen);
     lv_label_set_text(s_battery_label, "--%");
     lv_obj_set_style_text_color(s_battery_label, lv_color_hex(0x675f71), 0);
-    lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(s_battery_label, &todoteck_font_10, 0);
     lv_label_set_long_mode(s_battery_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_battery_label, 28);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, 4);
+}
+
+#define METER_WIDTH 100
+#define METER_LEVEL_HEIGHT 6
+#define METER_TIME_HEIGHT 3
+#define METER_LEVEL_Y 142
+#define METER_TIME_Y 152
+
+/*
+ * Zwei Balken, die nur waehrend der Aufnahme sichtbar sind.
+ *
+ * Oben der Pegel: er beantwortet die Frage "hoert das Ding mich ueberhaupt?",
+ * die man sonst erst nach dem Absenden beantwortet bekommt — und dann mit
+ * einer leeren Transkription. Darunter die Restzeit bis zur
+ * 30-Sekunden-Grenze, die der Server ohnehin zieht; ein Satz, der genau an
+ * der Grenze abbricht, ist teurer als ein Balken, der vorher warnt.
+ */
+static void create_meters(lv_obj_t *screen)
+{
+    s_meter_track = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_meter_track);
+    lv_obj_set_size(s_meter_track, METER_WIDTH, METER_LEVEL_HEIGHT);
+    lv_obj_set_style_radius(s_meter_track, METER_LEVEL_HEIGHT / 2, 0);
+    lv_obj_set_style_bg_opa(s_meter_track, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(s_meter_track, lv_color_hex(0x9a8fa4), 0);
+    lv_obj_align(s_meter_track, LV_ALIGN_TOP_MID, 0, METER_LEVEL_Y);
+    lv_obj_add_flag(s_meter_track, LV_OBJ_FLAG_HIDDEN);
+
+    s_meter_fill = lv_obj_create(s_meter_track);
+    lv_obj_remove_style_all(s_meter_fill);
+    lv_obj_set_size(s_meter_fill, 2, METER_LEVEL_HEIGHT);
+    lv_obj_set_style_radius(s_meter_fill, METER_LEVEL_HEIGHT / 2, 0);
+    lv_obj_set_style_bg_opa(s_meter_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_meter_fill, lv_color_hex(0x55c98a), 0);
+    lv_obj_align(s_meter_fill, LV_ALIGN_LEFT_MID, 0, 0);
+
+    s_time_track = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_time_track);
+    lv_obj_set_size(s_time_track, METER_WIDTH, METER_TIME_HEIGHT);
+    lv_obj_set_style_radius(s_time_track, METER_TIME_HEIGHT / 2, 0);
+    lv_obj_set_style_bg_opa(s_time_track, LV_OPA_20, 0);
+    lv_obj_set_style_bg_color(s_time_track, lv_color_hex(0x9a8fa4), 0);
+    lv_obj_align(s_time_track, LV_ALIGN_TOP_MID, 0, METER_TIME_Y);
+    lv_obj_add_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
+
+    s_time_fill = lv_obj_create(s_time_track);
+    lv_obj_remove_style_all(s_time_fill);
+    lv_obj_set_size(s_time_fill, METER_WIDTH, METER_TIME_HEIGHT);
+    lv_obj_set_style_radius(s_time_fill, METER_TIME_HEIGHT / 2, 0);
+    lv_obj_set_style_bg_opa(s_time_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_time_fill, lv_color_hex(0xf2b23c), 0);
+    lv_obj_align(s_time_fill, LV_ALIGN_LEFT_MID, 0, 0);
 }
 
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
@@ -180,20 +259,37 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     }
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
-    const bool pairing = scene == UI_STATUS_ICON_PAIRING || scene == UI_STATUS_ICON_BOOT;
     const bool error = scene == UI_STATUS_ICON_ERROR;
+    const bool recording = scene == UI_STATUS_ICON_RECORDING;
+
+    if (recording) {
+        lv_obj_remove_flag(s_meter_track, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_meter_track, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
+    }
+
     lv_color_t bg = resting ? lv_color_hex(0x1b2430) : lv_color_hex(0xfff7ed);
     lv_color_t text = resting ? lv_color_hex(0xe8eef7) : lv_color_hex(0x3f3440);
     lv_color_t muted = resting ? lv_color_hex(0xa8bad2) : lv_color_hex(0x7f7180);
     lv_color_t hint_color = resting ? lv_color_hex(0xdfe9f8) : muted;
+    /*
+     * Gefuellt gruen heisst verbunden, ein leerer Ring heisst getrennt — der
+     * Unterschied ist auch am Handgelenk und aus dem Augenwinkel zu sehen,
+     * anders als zwei aehnlich helle Farbtoene.
+     */
     lv_color_t ble = error ? lv_color_hex(0xf97373) :
-                     pairing ? lv_color_hex(0x8fb8ff) :
-                     lv_color_hex(0x55c98a);
+                     s_link_connected ? lv_color_hex(0x55c98a) :
+                     lv_color_hex(0x8fb8ff);
 
     lv_obj_set_style_bg_color(s_screen, bg, 0);
     lv_obj_set_style_text_color(s_screen, text, 0);
     lv_obj_set_style_text_color(s_top_label, muted, 0);
     lv_obj_set_style_bg_color(s_ble_dot, ble, 0);
+    lv_obj_set_style_bg_opa(s_ble_dot, s_link_connected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
+    lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, text, 0);
     lv_obj_set_style_text_color(s_hint_label, hint_color, 0);
     lv_obj_set_style_text_color(s_battery_label, muted, 0);
@@ -206,7 +302,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 static void render_current_locked(void)
 {
     if (s_dimmed) {
-        render_scene_locked(UI_STATUS_ICON_RESTING, "Resting", "");
+        render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "");
     } else {
         render_scene_locked(s_scene, s_status_text, s_hint_text);
     }
@@ -221,7 +317,7 @@ static void create_status_ui(void)
 
     s_top_label = lv_label_create(s_screen);
     lv_label_set_text(s_top_label, s_device_name);
-    lv_obj_set_style_text_font(s_top_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(s_top_label, &todoteck_font_10, 0);
     lv_obj_set_style_text_color(s_top_label, lv_color_hex(0x7f7180), 0);
     lv_label_set_long_mode(s_top_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_top_label, 66);
@@ -231,11 +327,12 @@ static void create_status_ui(void)
     lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, 0, 6);
 
     create_battery_ui(s_screen);
+    create_meters(s_screen);
     ui_status_icons_create(&s_icons, s_screen);
 
     s_status_label = lv_label_create(s_screen);
     lv_label_set_text(s_status_label, "Booting");
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -253,12 +350,33 @@ static void create_status_ui(void)
     render_current_locked();
 }
 
+/*
+ * Wie strlcpy, schneidet aber nie mitten in ein UTF-8-Zeichen. Ein halbierter
+ * Umlaut ergaebe auf dem Display ein Kaestchen — und die Texte kommen von
+ * aussen, sind also nicht vorhersehbar lang.
+ */
+static void copy_utf8_clipped(char *dst, const char *src, size_t size)
+{
+    if (size == 0) {
+        return;
+    }
+    size_t len = strlen(src);
+    if (len >= size) {
+        len = size - 1;
+        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) {
+            len--;
+        }
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
     s_scene = scene;
-    strlcpy(s_status_text, status ? status : "", sizeof(s_status_text));
-    strlcpy(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
+    copy_utf8_clipped(s_status_text, status ? status : "", sizeof(s_status_text));
+    copy_utf8_clipped(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
 }
@@ -396,8 +514,8 @@ void ui_status_prepare_deep_sleep(void)
 
 void ui_status_set_device_name(const char *device_name)
 {
-    strlcpy(s_device_name, device_name && device_name[0] ? device_name : "BLE",
-            sizeof(s_device_name));
+    copy_utf8_clipped(s_device_name, device_name && device_name[0] ? device_name : "BLE",
+                      sizeof(s_device_name));
 
     _lock_acquire(&s_lvgl_lock);
     if (s_ready) {
@@ -409,22 +527,22 @@ void ui_status_set_device_name(const char *device_name)
 void ui_status_set_advertising(void)
 {
     ESP_LOGD(TAG, "advertising");
-    set_scene(UI_STATUS_ICON_PAIRING, "Pairing", "Open the Mac app");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", "Brücke starten");
 }
 
 void ui_status_set_pairing(const char *device_name)
 {
     ESP_LOGD(TAG, "pairing %s", device_name ? device_name : "");
     ui_status_set_device_name(device_name);
-    set_scene(UI_STATUS_ICON_PAIRING, "Pairing", device_name ? device_name : "VS-0000");
+    set_scene(UI_STATUS_ICON_PAIRING, "Koppeln", device_name ? device_name : "VS-0000");
 }
 
 void ui_status_set_idle_hint(const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
-    strlcpy(s_idle_hint_text, hint && hint[0] ? hint : "Hold to Talk", sizeof(s_idle_hint_text));
+    copy_utf8_clipped(s_idle_hint_text, hint && hint[0] ? hint : "Halten zum Sprechen", sizeof(s_idle_hint_text));
     if (s_scene == UI_STATUS_ICON_IDLE) {
-        strlcpy(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
+        copy_utf8_clipped(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
         render_current_locked();
     }
     _lock_release(&s_lvgl_lock);
@@ -433,7 +551,102 @@ void ui_status_set_idle_hint(const char *hint)
 void ui_status_set_idle(void)
 {
     ESP_LOGD(TAG, "idle");
-    set_scene(UI_STATUS_ICON_IDLE, "Ready", s_idle_hint_text);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_idle_hint_text);
+}
+
+/*
+ * Wie ui_status_set_idle(), zeigt aber die Antwort der Bruecke statt des
+ * Standard-Hinweises. Der Text bleibt stehen, bis der naechste Turn beginnt —
+ * wer ihn verpasst hat, soll ihn noch lesen koennen.
+ *
+ * Ohne das bliebe die eigentliche Auskunft ("Aufgabe angelegt: Pool
+ * rueckspuelen") unsichtbar: sie kam schon immer ueber die Funkstrecke, wurde
+ * bei ready aber verworfen.
+ */
+void ui_status_set_idle_text(const char *text)
+{
+    if (!text || !text[0]) {
+        ui_status_set_idle();
+        return;
+    }
+    ESP_LOGD(TAG, "idle mit Text");
+    _lock_acquire(&s_lvgl_lock);
+    copy_utf8_clipped(s_last_answer, text, sizeof(s_last_answer));
+    _lock_release(&s_lvgl_lock);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", text);
+}
+
+/*
+ * Holt die zuletzt gezeigte Antwort zurueck auf den Bildschirm.
+ *
+ * Der Fall dahinter: Das Display dimmt nach 30 Sekunden und schlaeft nach
+ * fuenf Minuten ganz ein; wer den Stick erst danach ansieht, hat die Antwort
+ * nie gelesen. Sie noch einmal zu zeigen kostet nichts — sie erneut zu
+ * erfragen kostet Transkription, Intent und womoeglich eine zweite Aufgabe.
+ */
+void ui_status_show_last_answer(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool have = s_last_answer[0] != '\0';
+    _lock_release(&s_lvgl_lock);
+
+    if (!have) {
+        set_scene(UI_STATUS_ICON_IDLE, "Bereit", "Noch keine Antwort");
+        return;
+    }
+    ESP_LOGD(TAG, "letzte Antwort erneut");
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_last_answer);
+}
+
+/*
+ * Abbruch: die Aufnahme laeuft nicht weiter und es geht nichts an Todoteck.
+ * Bisher kehrte das Geraet dabei stumm in den Bereitzustand zurueck — nicht
+ * zu unterscheiden von "gesendet und nichts gefunden".
+ */
+void ui_status_set_cancelled(void)
+{
+    ESP_LOGI(TAG, "abgebrochen");
+    set_scene(UI_STATUS_ICON_IDLE, "Abgebrochen", "Nichts gesendet");
+}
+
+/*
+ * Der echte Verbindungszustand zur Bruecke. Faerbt nur den Punkt in der
+ * Kopfzeile — die Szene bleibt, wie sie ist.
+ */
+void ui_status_set_link(bool connected)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_link_connected != connected) {
+        s_link_connected = connected;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+/*
+ * Pegel und Restzeit waehrend der Aufnahme, beide in Prozent. Wird vom
+ * Aufnahme-Takt in main.c gespeist; ausserhalb der Aufnahme sind die Balken
+ * ausgeblendet, der Aufruf ist dann folgenlos.
+ */
+void ui_status_set_recording_meter(uint8_t level_percent, uint8_t remaining_percent)
+{
+    if (level_percent > 100) {
+        level_percent = 100;
+    }
+    if (remaining_percent > 100) {
+        remaining_percent = 100;
+    }
+
+    _lock_acquire(&s_lvgl_lock);
+    if (s_ready) {
+        lv_obj_set_width(s_meter_fill, MAX(2, (METER_WIDTH * level_percent) / 100));
+        lv_obj_set_width(s_time_fill, MAX(1, (METER_WIDTH * remaining_percent) / 100));
+        lv_obj_set_style_bg_color(s_time_fill,
+                                  remaining_percent <= 20 ? lv_color_hex(0xf97373) :
+                                  lv_color_hex(0xf2b23c),
+                                  0);
+    }
+    _lock_release(&s_lvgl_lock);
 }
 
 void ui_status_set_idle_dimmed(bool dimmed)
@@ -454,8 +667,8 @@ void ui_status_set_recording(uint32_t session_id)
 
     _lock_acquire(&s_lvgl_lock);
     s_scene = UI_STATUS_ICON_RECORDING;
-    strlcpy(s_status_text, "Listening", sizeof(s_status_text));
-    strlcpy(s_hint_text, "Speak now", sizeof(s_hint_text));
+    strlcpy(s_status_text, "Hört zu", sizeof(s_status_text));
+    strlcpy(s_hint_text, "Sprich jetzt", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
 }
@@ -485,7 +698,7 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
 void ui_status_set_partial_text(const char *text)
 {
     ESP_LOGD(TAG, "partial: %s", text ? text : "");
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Thinking", text ? text : "");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Denkt nach", text ? text : "");
 }
 
 void ui_status_set_ota_progress(uint32_t written, uint32_t size)
@@ -496,16 +709,16 @@ void ui_status_set_ota_progress(uint32_t written, uint32_t size)
         percent = MIN(100, (written * 100) / size);
     }
     snprintf(hint, sizeof(hint), "%" PRIu32 "%%", percent);
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Updating", hint);
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Aktualisiert", hint);
 }
 
 void ui_status_set_ota_rebooting(void)
 {
-    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Rebooting", "Firmware updated");
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Neustart", "Firmware aktualisiert");
 }
 
 void ui_status_set_error(const char *message)
 {
     ESP_LOGE(TAG, "%s", message ? message : "unknown error");
-    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unknown error");
+    set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unbekannter Fehler");
 }
