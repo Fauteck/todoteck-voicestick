@@ -447,7 +447,7 @@ static uint32_t start_recording(void)
     esp_err_t err = acquire_recording_pm_locks();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "acquire recording pm locks failed: %s", esp_err_to_name(err));
-        ui_status_set_error("Power lock failed");
+        ui_status_set_error("Gerät bleibt nicht wach");
         return 0;
     }
 
@@ -455,7 +455,7 @@ static uint32_t start_recording(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio start failed: %s", esp_err_to_name(err));
         release_recording_pm_locks();
-        ui_status_set_error("Audio start failed");
+        ui_status_set_error("Aufnahme startet nicht");
         return 0;
     }
 
@@ -676,7 +676,7 @@ static void apply_app_ui_state(const char *state, const char *text)
         ui_status_set_partial_text("");
     } else if (strcmp(state, "pending_confirmation") == 0) {
         s_app_ui_state = APP_UI_STATE_PENDING_CONFIRMATION;
-        ui_status_set_partial_text("Confirm or cancel");
+        ui_status_set_partial_text("Bestätigen oder abbrechen");
     } else if (strcmp(state, "error") == 0) {
         s_app_ui_state = APP_UI_STATE_ERROR;
         ui_status_set_error(text && text[0] ? text : "Unbekannter Fehler");
@@ -692,7 +692,7 @@ static void apply_app_ui_state(const char *state, const char *text)
 static void apply_interaction_mode(interaction_mode_t mode)
 {
     s_interaction_mode = mode;
-    ui_status_set_idle_hint(mode == INTERACTION_MODE_CLICK_TO_TALK ? "Click to Talk" : "Hold to Talk");
+    ui_status_set_idle_hint(mode == INTERACTION_MODE_CLICK_TO_TALK ? "Tippen zum Sprechen" : "Halten zum Sprechen");
     if (s_app_ui_state == APP_UI_STATE_READY && !s_recording) {
         ui_status_set_idle();
     }
@@ -1195,7 +1195,7 @@ void app_main(void)
     esp_err_t err = voice_ble_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(err));
-        ui_status_set_error("BLE init failed");
+        ui_status_set_error("Bluetooth nicht bereit");
     } else {
         ui_status_set_device_name(voice_ble_device_name());
     }
@@ -1203,7 +1203,7 @@ void app_main(void)
     esp_err_t audio_err = audio_pipeline_init();
     if (audio_err != ESP_OK) {
         ESP_LOGE(TAG, "audio init failed: %s", esp_err_to_name(audio_err));
-        ui_status_set_error("Audio init failed");
+        ui_status_set_error("Mikrofon nicht bereit");
     }
 
     if (err == ESP_OK) {
