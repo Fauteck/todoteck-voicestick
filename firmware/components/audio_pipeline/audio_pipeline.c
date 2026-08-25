@@ -1,6 +1,7 @@
 #include "audio_pipeline.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -43,6 +44,7 @@ typedef struct {
 } audio_packet_t;
 
 static atomic_bool s_running;
+static atomic_uint_least8_t s_level;
 static bool s_initialized;
 static uint32_t s_session_id;
 static uint32_t s_seq;
@@ -247,6 +249,7 @@ static void audio_task(void *arg)
     uint8_t opus_buf[OPUS_MAX_PACKET_SIZE];
     uint32_t enqueued = 0;
     uint32_t dropped = 0;
+    uint8_t level = 0;
 
     while (atomic_load(&s_running)) {
         esp_err_t err = esp_codec_dev_read(s_codec, mono, sizeof(mono));
@@ -254,6 +257,22 @@ static void audio_task(void *arg)
             ESP_LOGW(TAG, "codec read failed: %s", esp_err_to_name(err));
             continue;
         }
+
+        /*
+         * Spitzenwert je Rahmen, wurzelfoermig gestaucht und mit Nachlauf:
+         * ohne den Nachlauf zittert der Balken im Sprechrhythmus so stark,
+         * dass man nicht mehr erkennt, ob ueberhaupt etwas ankommt.
+         */
+        int32_t peak = 0;
+        for (int i = 0; i < AUDIO_FRAME_SAMPLES; ++i) {
+            const int32_t value = mono[i] < 0 ? -(int32_t)mono[i] : (int32_t)mono[i];
+            if (value > peak) {
+                peak = value;
+            }
+        }
+        const uint8_t fresh = (uint8_t)(100.0f * sqrtf((float)peak / 32768.0f));
+        level = fresh > level ? fresh : (uint8_t)((level * 3) / 4);
+        atomic_store(&s_level, level);
 
         opus_int32 encoded = opus_encode(s_opus_encoder, mono, AUDIO_FRAME_SAMPLES,
                                          opus_buf, sizeof(opus_buf));
@@ -287,6 +306,7 @@ static void audio_task(void *arg)
         }
     }
 
+    atomic_store(&s_level, 0);
     ESP_LOGI(TAG, "audio task exit: enqueued=%" PRIu32 " overflow_drops=%" PRIu32,
              enqueued, dropped);
     s_audio_task = NULL;
@@ -477,4 +497,14 @@ esp_err_t audio_pipeline_stop(void)
 uint32_t audio_pipeline_session_id(void)
 {
     return s_session_id;
+}
+
+uint8_t audio_pipeline_level(void)
+{
+    return (uint8_t)atomic_load(&s_level);
+}
+
+bool audio_pipeline_is_busy(void)
+{
+    return atomic_load(&s_running) || !tasks_exited();
 }

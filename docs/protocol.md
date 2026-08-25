@@ -83,6 +83,23 @@ Buttons are named by role instead of physical placement. On StickS3, the front
 button maps to `primary` and the side button maps to `secondary`. `session_id` is
 included when a `primary` press starts or stops a local audio recording.
 
+### Fork addition: `recording_discarded`
+
+The Todoteck fork emits one further state event when the side button aborts a
+running recording:
+
+```json
+{"event":"recording_discarded","session_id":1234}
+```
+
+It is a device fact, not an app action: tearing the capture path down always
+produces a normal END audio frame, so without this event an abort is
+indistinguishable from a completed utterance and the bridge would upload it.
+The event is sent before the END frame. A bridge that does not know it keeps
+working — it simply uploads the aborted take, exactly as before.
+
+This is deliberately *not* called `cancel`; see the deprecation table below.
+
 Deprecated firmware-to-app events:
 
 | Event | Replacement | Reason |
@@ -114,6 +131,19 @@ showing the recording cat when the primary button starts audio, but the app's
 `ui_state` is the authoritative display state. Current StickS3 firmware does not
 render recognition text on-device because the LVGL font set does not include
 Chinese glyphs; `text` is used only to choose fixed English hints.
+
+### Fork addition: `device_name`
+
+The Todoteck fork accepts one further control event, which replaces the
+advertised `VS-XXXX` name in the header with the name the device carries in
+Todoteck:
+
+```json
+{"event":"device_name","name":"Handgelenk"}
+```
+
+The name survives a disconnect, so the header keeps saying which of two sticks
+is in your hand. Firmware that does not know the event ignores it.
 
 `interaction_mode` controls the front-button behavior and idle screen hint.
 `hold_to_talk` starts audio on primary down and stops on primary up.

@@ -19,6 +19,7 @@
 #include "iot_button.h"
 
 #include "audio_pipeline.h"
+#include "audio_tone.h"
 #include "stick_s3_board.h"
 #include "ui_status.h"
 #include "voice_ble.h"
@@ -33,6 +34,16 @@ static const char *TAG = "voice_stick";
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
+/*
+ * Dieselbe Grenze, die der Server zieht (MAX_AUDIO_SECONDS in
+ * voiceTurnService.ts). Sie hier zu kennen heisst: der Balken kann sie
+ * anzeigen, und eine zu lange Aufnahme wird abgeschickt statt verworfen.
+ */
+#define RECORDING_MAX_MS (30 * 1000)
+#define RECORDING_TICK_MS 200
+#define RECORDING_TICK_US (RECORDING_TICK_MS * 1000ULL)
+/* Wie lange der Abbruch-Ton auf den Abbau des Aufnahmepfads wartet. */
+#define CANCEL_TONE_WAIT_MS 600
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -46,6 +57,15 @@ static esp_timer_handle_t s_display_dim_timer;
 static esp_timer_handle_t s_deep_sleep_timer;
 static esp_timer_handle_t s_battery_refresh_timer;
 static esp_timer_handle_t s_host_response_timer;
+static esp_timer_handle_t s_recording_tick_timer;
+static int64_t s_recording_started_us;
+/*
+ * Der Name aus Todoteck, sobald die Bruecke ihn geschickt hat. Er ueberlebt
+ * einen Verbindungsabbruch — sonst stuende beim naechsten Blick wieder
+ * VS-5290 in der Kopfzeile, und bei zwei Sticks wuesste man nicht, welcher
+ * in der Hand liegt.
+ */
+static char s_display_name[24];
 static uint32_t s_session_id = 1;
 static QueueHandle_t s_app_event_queue;
 static button_handle_t s_front_button;
@@ -104,6 +124,8 @@ typedef enum {
     APP_EVENT_OTA_DONE,
     APP_EVENT_OTA_END,
     APP_EVENT_HOST_RESPONSE_TIMEOUT,
+    APP_EVENT_RECORDING_TICK,
+    APP_EVENT_DEVICE_NAME,
 } app_event_type_t;
 
 typedef struct {
@@ -147,6 +169,7 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
 }
 
 static void queue_ui_state_event(const char *state, const char *text);
+static void queue_device_name_event(const char *name);
 static void apply_interaction_mode(interaction_mode_t mode);
 
 static bool is_external_powered(void)
@@ -363,6 +386,39 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();
 }
 
+/*
+ * Ein Ton nur, wenn der Aufnahmepfad die I2S-Leitungen freigegeben hat —
+ * Mikrofon und Lautsprecher haengen am selben Codec und teilen sich die
+ * Leitungen. Lieber stumm als eine zerissene Aufnahme.
+ */
+static void play_tone(audio_tone_t tone)
+{
+    if (audio_pipeline_is_busy()) {
+        ESP_LOGD(TAG, "Ton uebersprungen, Aufnahmepfad belegt");
+        return;
+    }
+    audio_tone_play(tone);
+}
+
+static void start_recording_tick(void)
+{
+    if (!s_recording_tick_timer) {
+        return;
+    }
+    (void)esp_timer_stop(s_recording_tick_timer);
+    esp_err_t err = esp_timer_start_periodic(s_recording_tick_timer, RECORDING_TICK_US);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "start recording tick failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void stop_recording_tick(void)
+{
+    if (s_recording_tick_timer) {
+        (void)esp_timer_stop(s_recording_tick_timer);
+    }
+}
+
 static bool app_ui_allows_recording_start(void)
 {
     return s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION;
@@ -381,6 +437,13 @@ static uint32_t start_recording(void)
     }
 
     const uint32_t session_id = s_session_id++;
+    /*
+     * Der Ton kommt **vor** dem Start des Aufnahmepfads: beide teilen sich
+     * die I2S-Leitungen, und der Piep ist ohnehin das Signal "jetzt
+     * sprechen" — er darf die ersten Silben nicht ueberlappen.
+     */
+    play_tone(AUDIO_TONE_START);
+
     esp_err_t err = acquire_recording_pm_locks();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "acquire recording pm locks failed: %s", esp_err_to_name(err));
@@ -398,9 +461,12 @@ static uint32_t start_recording(void)
 
     s_recording = true;
     s_app_ui_state = APP_UI_STATE_RECORDING;
+    s_recording_started_us = esp_timer_get_time();
     restart_display_dim_timer();
     restart_deep_sleep_timer();
     ui_status_set_recording(session_id);
+    ui_status_set_recording_meter(0, 100);
+    start_recording_tick();
     return session_id;
 }
 
@@ -412,6 +478,7 @@ static uint32_t stop_recording(void)
 
     const uint32_t session_id = audio_pipeline_session_id();
     s_recording = false;
+    stop_recording_tick();
     audio_pipeline_stop();
     release_recording_pm_locks();
     restart_display_dim_timer();
@@ -477,6 +544,25 @@ static void queue_ui_state_event(const char *state, const char *text)
     }
 }
 
+/*
+ * Der Name kommt aus den Todoteck-Einstellungen und wird ueber den
+ * BLE-Host-Task gemeldet. Ueber die Warteschlange statt direkt, damit die
+ * Anzeige nur aus einem Strang bedient wird.
+ */
+static void queue_device_name_event(const char *name)
+{
+    if (!s_app_event_queue || !name) {
+        return;
+    }
+    app_event_t event = {
+        .type = APP_EVENT_DEVICE_NAME,
+    };
+    copy_utf8_clipped(event.text, name, sizeof(event.text));
+    if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "drop device_name: app queue full");
+    }
+}
+
 static void front_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
@@ -522,7 +608,11 @@ static void ble_control_cb(const char *json)
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
     const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
-    if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (cJSON_IsString(event) && strcmp(event->valuestring, "device_name") == 0 &&
+        cJSON_IsString(name)) {
+        queue_device_name_event(name->valuestring);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "");
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "interaction_mode") == 0 &&
@@ -567,6 +657,13 @@ static void apply_app_ui_state(const char *state, const char *text)
         /* Traegt die Antwort einen Text, gehoert er aufs Display — bisher
          * wurde er hier verworfen und war damit nur in der App zu sehen. */
         ui_status_set_idle_text(text);
+        /*
+         * Nur bei echtem Inhalt einen Ton: die Bruecke setzt "ready" auch
+         * beim Verbinden und nach einer verworfenen, zu kurzen Aufnahme.
+         */
+        if (text && text[0]) {
+            play_tone(AUDIO_TONE_DONE);
+        }
         note_activity();
         voice_ble_request_slow_interval();
     } else if (strcmp(state, "recording") == 0) {
@@ -582,7 +679,8 @@ static void apply_app_ui_state(const char *state, const char *text)
         ui_status_set_partial_text("Confirm or cancel");
     } else if (strcmp(state, "error") == 0) {
         s_app_ui_state = APP_UI_STATE_ERROR;
-        ui_status_set_error(text && text[0] ? text : "Unknown error");
+        ui_status_set_error(text && text[0] ? text : "Unbekannter Fehler");
+        play_tone(AUDIO_TONE_ERROR);
     } else {
         ESP_LOGW(TAG, "unknown ui_state %s", state);
     }
@@ -693,17 +791,54 @@ static void app_event_task(void *arg)
             note_activity();
             s_secondary_down_us = esp_timer_get_time();
             break;
-        case APP_EVENT_SIDE_UP:
+        case APP_EVENT_SIDE_UP: {
             ESP_LOGI(TAG, "button side up");
             note_activity();
-            voice_ble_send_button_click("secondary", elapsed_button_ms(s_secondary_down_us), 0);
+            const uint32_t secondary_duration_ms = elapsed_button_ms(s_secondary_down_us);
             s_secondary_down_us = 0;
+
+            if (s_recording) {
+                /*
+                 * Abbruch. Das Ereignis geht vor dem Ende-Rahmen raus, den
+                 * der Abbau des Aufnahmepfads ohnehin schickt — sonst waere
+                 * der Abbruch fuer die Bruecke nicht von einem normalen Ende
+                 * zu unterscheiden und die Aufnahme ginge trotzdem an
+                 * Todoteck.
+                 */
+                const uint32_t cancelled = stop_recording();
+                (void)voice_ble_send_recording_discarded(cancelled);
+                s_primary_down_us = 0;
+                s_primary_session_id = 0;
+                s_app_ui_state = APP_UI_STATE_READY;
+                ui_status_set_cancelled();
+                /*
+                 * Der Abbau des Aufnahmepfads laeuft in eigenen Tasks und
+                 * gibt die I2S-Leitungen erst nach dem Leeren der
+                 * Warteschlange frei. Kurz darauf warten, sonst faellt genau
+                 * der Ton aus, der den Abbruch quittieren soll.
+                 */
+                for (int waited = 0;
+                     waited < CANCEL_TONE_WAIT_MS && audio_pipeline_is_busy();
+                     waited += 20) {
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                }
+                play_tone(AUDIO_TONE_CANCEL);
+                break;
+            }
+
+            if (s_app_ui_state == APP_UI_STATE_READY) {
+                /* Kurzer Druck im Ruhezustand holt die letzte Antwort zurueck. */
+                ui_status_show_last_answer();
+            }
+            voice_ble_send_button_click("secondary", secondary_duration_ms, 0);
             break;
+        }
         case APP_EVENT_UI_STATE:
             apply_app_ui_state(event.state, event.text);
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
+            ui_status_set_link(true);
             ui_status_set_idle();
             note_activity();
             break;
@@ -715,7 +850,10 @@ static void app_event_task(void *arg)
             audio_pipeline_stop();
             release_recording_pm_locks();
             release_ota_pm_locks();
-            ui_status_set_pairing(voice_ble_device_name());
+            stop_recording_tick();
+            ui_status_set_link(false);
+            ui_status_set_pairing(s_display_name[0] ? s_display_name
+                                                    : voice_ble_device_name());
             break;
         case APP_EVENT_POWER_IRQ:
             gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
@@ -755,6 +893,42 @@ static void app_event_task(void *arg)
             ui_status_set_idle();
             note_activity();
             break;
+        case APP_EVENT_DEVICE_NAME:
+            if (event.text[0]) {
+                copy_utf8_clipped(s_display_name, event.text, sizeof(s_display_name));
+                ESP_LOGI(TAG, "Anzeigename aus Todoteck: %s", s_display_name);
+                ui_status_set_device_name(s_display_name);
+            }
+            break;
+        case APP_EVENT_RECORDING_TICK: {
+            if (!s_recording) {
+                stop_recording_tick();
+                break;
+            }
+            const uint32_t elapsed_ms = elapsed_button_ms(s_recording_started_us);
+            const uint8_t remaining = elapsed_ms >= RECORDING_MAX_MS
+                ? 0
+                : (uint8_t)(100 - (elapsed_ms * 100) / RECORDING_MAX_MS);
+            ui_status_set_recording_meter(audio_pipeline_level(), remaining);
+            if (elapsed_ms >= RECORDING_MAX_MS) {
+                /*
+                 * An der Grenze wird abgeschickt, nicht verworfen: der Server
+                 * nimmt ohnehin nur 30 Sekunden an, und ein Satz, der bis
+                 * dahin lief, ist mehr wert als gar nichts.
+                 */
+                ESP_LOGI(TAG, "Aufnahmegrenze erreicht, sende automatisch");
+                const uint32_t session_id = stop_recording();
+                esp_err_t limit_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
+                    ? voice_ble_send_button_click("primary", elapsed_ms, session_id)
+                    : voice_ble_send_button_up("primary", elapsed_ms, session_id);
+                if (session_id != 0 && limit_err != ESP_OK) {
+                    apply_app_ui_state("ready", "");
+                }
+                s_primary_down_us = 0;
+                s_primary_session_id = 0;
+            }
+            break;
+        }
         case APP_EVENT_HOST_RESPONSE_TIMEOUT:
             if (!s_recording && (s_app_ui_state == APP_UI_STATE_RECORDING ||
                                  s_app_ui_state == APP_UI_STATE_THINKING)) {
@@ -864,6 +1038,22 @@ static esp_err_t init_deep_sleep_timer(void)
         .name = "deep_sleep",
     };
     return esp_timer_create(&timer_args, &s_deep_sleep_timer);
+}
+
+static void recording_tick_timer_cb(void *arg)
+{
+    (void)arg;
+    queue_app_event(APP_EVENT_RECORDING_TICK);
+}
+
+static esp_err_t init_recording_tick_timer(void)
+{
+    const esp_timer_create_args_t timer_args = {
+        .callback = recording_tick_timer_cb,
+        .name = "recording_tick",
+        .skip_unhandled_events = true,
+    };
+    return esp_timer_create(&timer_args, &s_recording_tick_timer);
 }
 
 static esp_err_t init_host_response_timer(void)
@@ -994,6 +1184,8 @@ void app_main(void)
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());
     ESP_ERROR_CHECK(init_host_response_timer());
+    ESP_ERROR_CHECK(init_recording_tick_timer());
+    ESP_ERROR_CHECK(audio_tone_init());
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);

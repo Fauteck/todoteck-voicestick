@@ -50,3 +50,18 @@ esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,
                                    uint32_t session_id);
 esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
                                       uint32_t session_id);
+
+/*
+ * Sagt der Gegenstelle, dass diese Aufnahme verworfen wird.
+ *
+ * Ohne das Ereignis waere ein Abbruch nicht von einem normalen Ende zu
+ * unterscheiden: der Abbau des Aufnahmepfads schickt in beiden Faellen einen
+ * Ende-Rahmen, und die Bruecke wuerde ihn wie sonst auch an Todoteck senden.
+ * Das Ereignis geht vor dem Ende-Rahmen raus.
+ *
+ * Bewusst nicht "cancel": diesen Namen hat das Protokoll abgekuendigt, weil
+ * er eine App-Bedeutung transportierte. Hier wird eine Geraetetatsache
+ * gemeldet — diese Sitzung ist verworfen —, und was die Gegenstelle daraus
+ * macht, bleibt ihre Sache.
+ */
+esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);
