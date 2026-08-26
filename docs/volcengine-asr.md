@@ -2,6 +2,11 @@
 
 This note keeps only the Volcengine ASR details that matter to Voice Stick.
 
+It describes the **upstream desktop apps** under `desktop/`, which talk to
+Volcengine or the VoiceStick Cloud relay directly. The Todoteck bridge does none
+of this: it posts the Opus frames to `POST /api/voice/turn` and recognition
+happens on the Todoteck server.
+
 ## Endpoint
 
 Voice Stick uses the optimized bidirectional streaming endpoint:

@@ -1,0 +1,41 @@
+# Prueft die Doku gegen den Code.
+#
+# Der Grund steht in CLAUDE.md unter `Doku-Hygiene`: Was zuerst gelesen wird —
+# README, CLAUDE.md, docs/ — ist am schwaechsten gesichert, weil nichts es
+# nachrechnet. Code und Firmware haben ein Gate, die Doku hatte keins.
+#
+# Geprueft werden nur Mengen, die sich aus dem Code ableiten lassen (GATT-UUIDs,
+# angekuendigte `ui_state`-Zustaende, Firmware-Fassung, Schriftstufen,
+# Komponenten-Abhaengigkeiten). Prosa, Beispiele und Begruendungen bleiben
+# ungeprueft — die koennen nicht veralten, ohne dass jemand sie liest.
+#
+# Der Lauf braucht nichts ausser Python; kein ESP-IDF, keine Abhaengigkeiten.
+
+name: Doku gegen den Code pruefen
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'firmware/**'
+      - 'scripts/check-docs.py'
+      - '.github/workflows/doku.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'firmware/**'
+      - 'scripts/check-docs.py'
+      - '.github/workflows/doku.yml'
+
+jobs:
+  pruefen:
+    name: Doku-Vertraege
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vertraege pruefen
+        run: python3 scripts/check-docs.py

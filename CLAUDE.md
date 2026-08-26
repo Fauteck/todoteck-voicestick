@@ -20,6 +20,10 @@ Kurzfassung für dieses Repo:
 - Eine Regel hier beschreibt, was **tatsächlich passiert**. Weicht sie von
   der Praxis ab, wird die Regel korrigiert — nicht die Praxis behauptet.
 - Was sich aus dem Code aufzählen lässt (Modul-, Route-, Tabellenlisten,
-  Verzeichnisbäume), gehört in einen Test, nicht in Prosa.
+  Verzeichnisbäume), gehört in einen Test, nicht in Prosa. Den gibt es:
+  `scripts/check-docs.py` vergleicht markierte Regionen
+  (`<!-- doku-vertrag:name --> … <!-- /doku-vertrag -->`) gegen den Code und
+  läuft in `.github/workflows/doku.yml`. Eine neue Aufzählung in der Doku
+  bekommt dort einen Vertrag oder wird ein Zeiger — kein dritter Weg.
 - Status („X von Y umgesetzt", „noch kein PR") gehört nach Todoteck oder in
   git — nicht in eine Datei, die beim Erledigen niemand anfasst.

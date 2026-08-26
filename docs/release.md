@@ -1,5 +1,16 @@
 # VoiceStick Release Process
 
+> **This is upstream's process, and no part of it is used in this fork.** It is
+> kept so the fork stays mergeable and because it documents what the `release.yml`
+> workflow in this repository would do if a `v*` tag were ever pushed: check the
+> tag against `VERSION`, upload to Aliyun OSS, sign with Apple certificates and
+> deploy a website in the **upstream** repository. None of that works in a fork.
+>
+> The fork's firmware path is `.github/workflows/firmware.yml` and the rolling
+> `firmware-latest` pre-release — see
+> [Firmware Build in CI](../README.md#firmware-build-in-ci). Do not follow the
+> steps below and do not try to repair `release.yml`.
+
 VoiceStick releases have three moving parts:
 
 - macOS app: built, signed, notarized, and uploaded by GitHub Actions.

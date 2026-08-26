@@ -1,6 +1,9 @@
 # Voice Stick Protocol
 
-This document describes the protocol implemented by the current firmware and macOS desktop app.
+This document describes the protocol implemented by the firmware. It has two
+hosts: the upstream desktop apps under `desktop/`, and the Todoteck bridge in
+the [Todoteck repository](https://github.com/Fauteck/todo). Where a section
+speaks only for one of them, it says so; the goals below are upstream's.
 
 ## Goals
 
@@ -15,19 +18,23 @@ Device name: `VS-XXXX`, where `XXXX` is derived from the last two bytes of the d
 
 Service UUID:
 
+<!-- doku-vertrag:gatt-dienst -->
 ```text
 8f2f0b84-6e6f-4b23-88f7-3a3ceafc5100
 ```
+<!-- /doku-vertrag -->
 
 Characteristics:
 
+<!-- doku-vertrag:gatt-merkmale -->
 | Name | UUID | Direction | Properties |
 | --- | --- | --- | --- |
-| `audio_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5101` | StickS3 -> Mac | notify |
-| `state_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5102` | StickS3 -> Mac | notify |
-| `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | Mac -> StickS3 | write without response |
-| `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | Mac -> StickS3 | write, write without response |
-| `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
+| `audio_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5101` | StickS3 -> host | notify |
+| `state_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5102` | StickS3 -> host | notify |
+| `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | host -> StickS3 | write without response |
+| `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | host -> StickS3 | write, write without response |
+| `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> host | notify |
+<!-- /doku-vertrag -->
 
 The desktop app scans for this service and only connects to devices whose `VS-XXXX` ID is present in the local paired-device list. Multiple paired devices may be connected at the same time; audio, state, control, and OTA handling are scoped by CoreBluetooth peripheral identity.
 
@@ -71,8 +78,13 @@ business actions such as "cancel" or "confirm"; the app owns that interpretation
 
 Currently emitted state events:
 
+<!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.2.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
+```
+<!-- /doku-vertrag -->
+
+```json
 {"event":"button_down","button":"primary","session_id":1234}
 {"event":"button_up","button":"primary","duration_ms":620,"session_id":1234}
 {"event":"button_down","button":"secondary"}
@@ -138,10 +150,15 @@ Current desktop events:
 
 The desktop helper always includes a `text` field, even for states without text
 content. Firmware may immediately render local physical feedback, such as
-showing the recording cat when the primary button starts audio, but the app's
-`ui_state` is the authoritative display state. Current StickS3 firmware does not
-render recognition text on-device because the LVGL font set does not include
-Chinese glyphs; `text` is used only to choose fixed English hints.
+switching Tecki to the recording pose when the primary button starts audio, but
+the app's `ui_state` is the authoritative display state.
+
+The fork renders the `text` field: it arrives with `ready` and is shown as the
+answer, in the largest of six font sizes that fits, with Tecki stepping aside
+for text that needs the whole screen. Upstream firmware ignores it for anything
+but picking a fixed English hint, because its LVGL font set is ASCII-only. Both
+behaviours are legal for a host — a bridge cannot tell from the protocol which
+one it is talking to, and the fork's fonts stop at Latin-1 either way.
 
 ### Fork addition: `device_name`
 
@@ -268,8 +285,8 @@ macOS:
 needs_pairing -> scanning -> ready -> recording -> thinking -> pending_confirmation -> ready
 ```
 
-During recognition and confirmation, the firmware keeps showing the thinking cat
-until the app sends `ui_state:ready`. During pending confirmation, `primary`
+During recognition and confirmation, the firmware keeps showing the thinking
+pose until the app sends `ui_state:ready`. During pending confirmation, `primary`
 confirms or pauses according to the app's internal countdown mode, and
 `secondary` cancels. When idle, `secondary` restores the last recoverable input
 confirmation. These meanings are app state-machine behavior, not firmware
