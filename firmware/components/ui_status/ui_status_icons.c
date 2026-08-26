@@ -40,7 +40,7 @@
  * Beides sind die im Design-System festgelegten Logo-Toene, keine Erfindung.
  *
  * ── Was bewusst fehlt ───────────────────────────────────────────────────────
- * Kein Blinzeln (die 440 mAh sind der Grund), kein Mund ausser beim Antworten
+ * Kein Blinzeln (der kleine Akku ist der Grund), kein Mund ausser beim Antworten
  * — und einen Sprech-Zustand kennt diese Firmware noch gar nicht, der kommt
  * erst mit der Sprachausgabe. Keine Schallwellen beim Aufnehmen, weil daneben
  * schon Pegel und Laufzeit stehen; kein Warnzeichen beim Fehler, weil der

@@ -18,9 +18,11 @@ the `ui_state` control event. The macOS, Windows and Linux apps in `desktop/` ar
 upstream code and untouched by this fork — see
 [Upstream Desktop Apps](#upstream-desktop-apps).
 
-> **Hardware status:** the fork changes below are written and build in CI, but
-> the first run on a real StickS3 is still open. There is no ESP-IDF environment
-> where they were authored.
+> **Hardware status (as of 2026-08-26):** the fork changes below are written and
+> build in CI, but the first run on a real StickS3 is still open — the device
+> still runs the factory firmware, and there is no ESP-IDF environment where the
+> changes were authored. This line is a point in time, not a property of the
+> repo; the live state lives in the `Todoteck: Audio Gerät` task, not here.
 
 ## What This Fork Changes
 
@@ -36,7 +38,7 @@ upstream code and untouched by this fork — see
 | Hold really means hold: a press shorter than 500 ms is discarded on the device, screen shows `Zu kurz` | A tap started a recording exactly like a hold, so whoever started speaking afterwards spoke into a recording that had already ended. The bridge dropped those takes silently (`MIN_TURN_MILLIS`); the device now says so instead |
 | The recording never outlives the press: every 200 ms tick compares the GPIO against the recording state | The release arrives from an ISR callback through a twelve-slot queue. If it is lost, the take used to run to the 30 s limit with nobody speaking. The tick replays the missing event; two consecutive ticks are required so a single misread cannot cut a sentence |
 | Long text pushes Tecki off the screen instead of running through him | An answer like "Aufgabe angelegt: AliExpress Bestellung · Fällig: Di., 25.08.2026 · Projekt: Home Lab" needs seven lines on 119 px. They used to grow upwards from the bottom edge across the status line and straight through the figure. The decision is made on the measured text, not on the scene: if it fits below Tecki nothing changes, if it does not, Tecki steps aside and the text gets the whole screen in the largest font that fits |
-| The answer is set in the largest of six sizes (10, 11, 12, 13, 14, 16 px) that still fits the free area, each with its own line spacing | With only 10 px and 16 px to choose from, anything longer than a line landed in the smallest one — a two-sentence answer filled two thirds of the screen and left the rest white while being barely readable. The steps in between turn that white space into type size |
+| The answer is set in the largest of six sizes (<!-- doku-vertrag:schriftstufen -->10, 11, 12, 13, 14, 16 px<!-- /doku-vertrag -->) that still fits the free area, each with its own line spacing | With only 10 px and 16 px to choose from, anything longer than a line landed in the smallest one — a two-sentence answer filled two thirds of the screen and left the rest white while being barely readable. The steps in between turn that white space into type size |
 | Characters the fonts lack are substituted or dropped, not drawn as boxes | Bridge answers carry emoji (check mark, calendar, folder) and typographic punctuation. The emoji showed as empty rectangles mid-sentence and are removed together with the gap around them; dashes, curly quotes and ellipses are replaced with their ASCII equivalents, because dropping them would turn "Aufgabe – heute" into "Aufgabe heute" |
 | Side button while idle shows the last answer again | The screen dims after 30 s and sleeps after 5 minutes; whoever looks later never read the answer |
 | Connection dot carries the real link state (filled green connected, empty ring disconnected) | It used to be derived from the scene, so a bridge dropping mid-screen was only noticed at the next attempt |
@@ -67,7 +69,7 @@ Two things about him are decided here rather than there:
   is the widest the mark can be while all six poses stay inside the 112 px
   square; wider and the tip in `Fehler` leaves the frame on the right.
 
-What he deliberately does not do: no blinking (440 mAh), no sound waves while
+What he deliberately does not do: no blinking (the battery is small), no sound waves while
 recording (the level meter and the time bar are already there), no warning
 sign on error (the body turns red and the status line says so). A third signal
 for the same thing is noise.
@@ -92,7 +94,29 @@ upstream tooling, and deleting them would only add conflicts the next time
 - `docs/protocol.md`: BLE protocol between StickS3 and host, including the fork additions.
 - `docs/volcengine-asr.md`: trimmed Volcengine ASR notes used by the upstream desktop client.
 - `docs/release.md`: upstream release process (not used by this fork).
-- `scripts/`: sprite slicing, palette tuning, and LVGL ARGB binary conversion helpers.
+- `scripts/`: upstream packaging and release helpers, the three cat-sprite tools that lost their consumer with Tecki, and `check-docs.py`, which checks this documentation against the code.
+
+## Documentation Contracts
+
+Parts of this README and of `docs/protocol.md` restate sets that live in the
+code — UUIDs, the states the firmware announces, dependency names. Those parts
+are marked:
+
+```text
+<!-- doku-vertrag:name --> ... <!-- /doku-vertrag -->
+```
+
+`scripts/check-docs.py` compares every marked region against the source and
+fails if they have drifted apart; `.github/workflows/doku.yml` runs it on each
+push and pull request touching the docs or the firmware. Run it yourself with
+`python3 scripts/check-docs.py` — it needs nothing but Python, and the script
+itself is the list of what is under contract.
+
+Wording around a marked region can be rewritten freely: the contract holds the
+claim, not the sentence. A missing marker is a failure too, so a contract
+cannot be dropped by deleting a comment. Everything outside the markers is
+prose, examples and reasoning, and is deliberately not checked — those cannot
+go stale without someone reading them.
 
 ## Firmware Features
 
@@ -102,7 +126,7 @@ upstream tooling, and deleting them would only add conflicts the next time
 - Recording is capped at 30 seconds. A bar counts the remaining time down; at zero the firmware sends the take like a normal button release.
 - The side button aborts a running recording, emits `recording_discarded`, shows `Abgebrochen` and plays the discard tone.
 - The screen shows pairing, ready, listening (`Hört zu`), thinking (`Denkt nach`), pending confirmation, error and battery states from host-sent `ui_state` updates. Text arriving with `ready` is rendered as the answer and kept for recall (up to 192 bytes).
-- Text that does not fit below Tecki takes the whole screen and Tecki is hidden for as long as it is shown; the font is the largest of the two that fits, and anything beyond that ends in an ellipsis. Characters outside the fonts' Latin-1 range are replaced with ASCII where an equivalent exists and dropped otherwise.
+- Text that does not fit below Tecki takes the whole screen and Tecki is hidden for as long as it is shown; the font is the largest size that fits, and anything beyond even the smallest ends in an ellipsis. Characters outside the fonts' Latin-1 range are replaced with ASCII where an equivalent exists and dropped otherwise.
 - The screen dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
 - BLE OTA updates over the two 3 MB app slots of the OTA partition table.
 
@@ -151,26 +175,15 @@ forwarded as they are.
 
 ## BLE Protocol Summary
 
-GATT service:
+One GATT service with five characteristics — audio and state as notifications
+from the stick, control writes and the two OTA channels in the other direction.
+UUIDs, frame layouts and the full event list live in
+[docs/protocol.md](docs/protocol.md) and are not repeated here.
 
-```text
-8f2f0b84-6e6f-4b23-88f7-3a3ceafc5100
-```
-
-Characteristics:
-
-| Name | UUID | Direction | Properties |
-| --- | --- | --- | --- |
-| `audio_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5101` | StickS3 -> host | notify |
-| `state_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5102` | StickS3 -> host | notify |
-| `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | host -> StickS3 | write without response |
-
-Fork additions, both documented in `docs/protocol.md`:
-
-```json
-{"event":"recording_discarded","session_id":1234}
-{"event":"device_name","name":"Handgelenk"}
-```
+The fork adds one event in each direction, both optional: `recording_discarded`
+(stick to host, a take was thrown away on the device) and `device_name` (host to
+stick, the name shown in the header). A counterpart that does not know them
+keeps working.
 
 The negotiated MTU (measured: 247) caps a control event at 244 bytes, which
 leaves roughly 195 bytes of answer text after the JSON frame — about 180
@@ -249,10 +262,12 @@ idf.py -p /dev/cu.usbmodemXXXX erase-flash flash monitor
 
 Firmware dependencies are declared through the ESP-IDF component manager:
 
+<!-- doku-vertrag:firmware-abhaengigkeiten -->
 - `espressif/button`
 - `espressif/esp_codec_dev`
 - `78/esp-opus`
 - `lvgl/lvgl`
+<!-- /doku-vertrag -->
 
 ## Upstream Desktop Apps
 
