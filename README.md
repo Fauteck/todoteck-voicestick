@@ -69,7 +69,7 @@ Two things about him are decided here rather than there:
   is the widest the mark can be while all six poses stay inside the 112 px
   square; wider and the tip in `Fehler` leaves the frame on the right.
 
-What he deliberately does not do: no blinking (440 mAh), no sound waves while
+What he deliberately does not do: no blinking (the battery is small), no sound waves while
 recording (the level meter and the time bar are already there), no warning
 sign on error (the body turns red and the status line says so). A third signal
 for the same thing is noise.
