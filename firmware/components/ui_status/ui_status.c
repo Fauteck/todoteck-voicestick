@@ -56,6 +56,10 @@ static const char *TAG = "ui_status";
  * also Umlaute und Eszett.
  */
 LV_FONT_DECLARE(todoteck_font_16);
+LV_FONT_DECLARE(todoteck_font_14);
+LV_FONT_DECLARE(todoteck_font_13);
+LV_FONT_DECLARE(todoteck_font_12);
+LV_FONT_DECLARE(todoteck_font_11);
 LV_FONT_DECLARE(todoteck_font_10);
 
 /*
@@ -258,28 +262,83 @@ static void create_meters(lv_obj_t *screen)
  */
 #define CONTENT_W (LCD_H_RES - 16)
 #define CONTENT_H (LCD_V_RES - 16)
+/*
+ * Zwei Untergrenzen fuer den Text, weil er zwei Arten haengt: unter Tecki
+ * haengt er am unteren Rand (Ausrichtung BOTTOM_MID mit -10), ohne Tecki
+ * steht er oben und darf bis fast nach unten laufen. Wer die 10 hier aendert,
+ * muss den Versatz beim Ausrichten mitaendern.
+ */
 #define TEXT_BOTTOM_Y (CONTENT_H - 10)
+#define TEXT_ONLY_BOTTOM_Y (CONTENT_H - 4)
 #define STATUS_Y_WITH_TECKI 168
 #define STATUS_Y_TEXT_ONLY 18
 #define TEXT_GAP 6
-#define TEXT_LINE_SPACE 2
+
+/*
+ * Die Schriftleiter fuer den unteren Text, von gross nach klein.
+ *
+ * Genommen wird die groesste Stufe, auf der die Auskunft noch ganz auf den
+ * Schirm passt — vorher gab es nur 16 oder 10, und weil eine laengere Antwort
+ * in 16 nie passt, landete praktisch jede in der kleinsten Schrift, mit
+ * Weissflaeche darunter. Die Zwischenstufen fuellen genau diese Luecke.
+ *
+ * Die 16er ist der halbfette Schnitt (600) und traegt zugleich die
+ * Statuszeile; die kleineren Stufen sind der normale (500), weil halbfett
+ * unter 14 Pixeln zulaeuft.
+ *
+ * `line_space` steht dabei pro Stufe, nicht global: lv_font_conv rundet die
+ * Zeilenhoehe je nach Groesse anders (10->11, 11->14, 12->16, 13->16, 14->18,
+ * 16->21), sie traegt also mal mehr, mal weniger Luft fuer Umlautpunkte
+ * schon in sich. Die Zahl hier gleicht das auf einen Zeilenabstand von rund
+ * dem 1,35-fachen der Schriftgroesse aus.
+ */
+typedef struct {
+    const lv_font_t *font;
+    int32_t line_space;
+} text_step_t;
+
+static const text_step_t TEXT_STEPS[] = {
+    { &todoteck_font_16, 2 },
+    { &todoteck_font_14, 1 },
+    { &todoteck_font_13, 1 },
+    { &todoteck_font_12, 0 },
+    { &todoteck_font_11, 1 },
+    { &todoteck_font_10, 2 },
+};
+
+#define TEXT_STEP_COUNT (sizeof(TEXT_STEPS) / sizeof(TEXT_STEPS[0]))
+/* Die kleinste Stufe: Rueckfall, wenn selbst sie ueberlaeuft. */
+#define TEXT_STEP_SMALLEST (TEXT_STEPS[TEXT_STEP_COUNT - 1])
 
 typedef struct {
     bool tecki;             /* bleibt die Figur stehen? */
     const lv_font_t *font;  /* Schrift des unteren Texts */
+    int32_t line_space;     /* Zeilenabstand dazu */
     int32_t status_y;       /* Oberkante der Statuszeile */
 } text_layout_t;
 
-static int32_t text_height(const char *text, const lv_font_t *font)
+static int32_t text_height(const char *text, const text_step_t *step)
 {
     lv_point_t size;
-    lv_text_get_size(&size, text ? text : "", font, 0, TEXT_LINE_SPACE, CONTENT_W,
+    lv_text_get_size(&size, text ? text : "", step->font, 0, step->line_space, CONTENT_W,
                      LV_TEXT_FLAG_NONE);
     return size.y;
 }
 
+/* Die groesste Stufe, auf der der Text noch in `room` passt — sonst NULL. */
+static const text_step_t *largest_step_fitting(const char *text, int32_t room)
+{
+    for (size_t i = 0; i < TEXT_STEP_COUNT; i++) {
+        if (text_height(text, &TEXT_STEPS[i]) <= room) {
+            return &TEXT_STEPS[i];
+        }
+    }
+    return NULL;
+}
+
 /*
- * Wo Statuszeile und Text hinkommen — und ob Tecki dabei stehen bleibt.
+ * Wo Statuszeile und Text hinkommen, wie gross er wird — und ob Tecki dabei
+ * stehen bleibt.
  *
  * Der Anlass steht auf einem Foto vom Handgelenk: "Aufgabe angelegt:
  * AliExpress Bestellung · Faellig: Di., 25.08.2026 · Projekt: Home Lab"
@@ -290,19 +349,23 @@ static int32_t text_height(const char *text, const lv_font_t *font)
  * Die Entscheidung faellt deshalb am gemessenen Text, nicht an der Szene:
  * Passt er unter Tecki, bleibt alles wie gehabt. Passt er nicht, weicht
  * Tecki. Er sagt ohnehin dasselbe wie die Statuszeile daneben; der Text sagt
- * etwas, das es nur einmal gibt.
+ * etwas, das es nur einmal gibt. Und in beiden Faellen bekommt der Text die
+ * groesste Schrift, die der freie Platz noch traegt.
  */
 static text_layout_t plan_text_layout(const char *status, const char *text, ui_text_kind_t kind)
 {
     const int32_t status_h = status && status[0] ? todoteck_font_16.line_height : 0;
     const int32_t room_under_tecki = TEXT_BOTTOM_Y - (STATUS_Y_WITH_TECKI + status_h);
 
-    /* Eine Auskunft, die in eine Zeile passt, darf gross bleiben. */
-    if (kind == UI_TEXT_MESSAGE && text_height(text, &todoteck_font_16) <= room_under_tecki) {
-        return (text_layout_t){ true, &todoteck_font_16, STATUS_Y_WITH_TECKI };
-    }
-    if (text_height(text, &todoteck_font_10) <= room_under_tecki) {
-        return (text_layout_t){ true, &todoteck_font_10, STATUS_Y_WITH_TECKI };
+    if (kind == UI_TEXT_MESSAGE) {
+        const text_step_t *step = largest_step_fitting(text, room_under_tecki);
+        if (step) {
+            return (text_layout_t){ true, step->font, step->line_space, STATUS_Y_WITH_TECKI };
+        }
+    } else if (text_height(text, &TEXT_STEP_SMALLEST) <= room_under_tecki) {
+        /* Beiwerk bleibt klein und gedaempft, auch wenn Platz waere. */
+        return (text_layout_t){ true, TEXT_STEP_SMALLEST.font, TEXT_STEP_SMALLEST.line_space,
+                                STATUS_Y_WITH_TECKI };
     }
 
     /*
@@ -311,11 +374,11 @@ static text_layout_t plan_text_layout(const char *status, const char *text, ui_t
      * ist — sonst spraenge das Layout, sobald sie doch etwas traegt.
      */
     const int32_t top = STATUS_Y_TEXT_ONLY + todoteck_font_16.line_height + TEXT_GAP;
-    const int32_t room_full = TEXT_BOTTOM_Y - top;
-    const lv_font_t *font = text_height(text, &todoteck_font_16) <= room_full
-                                ? &todoteck_font_16
-                                : &todoteck_font_10;
-    return (text_layout_t){ false, font, STATUS_Y_TEXT_ONLY };
+    const text_step_t *step = largest_step_fitting(text, TEXT_ONLY_BOTTOM_Y - top);
+    if (!step) {
+        step = &TEXT_STEP_SMALLEST;
+    }
+    return (text_layout_t){ false, step->font, step->line_space, STATUS_Y_TEXT_ONLY };
 }
 
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
@@ -345,6 +408,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     lv_label_set_text(s_hint_label, body_text);
     lv_obj_set_style_text_font(s_hint_label, plan.font, 0);
+    lv_obj_set_style_text_line_space(s_hint_label, plan.line_space, 0);
     if (plan.tecki) {
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
@@ -357,7 +421,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
         const int32_t top = plan.status_y + todoteck_font_16.line_height + TEXT_GAP;
-        lv_obj_set_height(s_hint_label, TEXT_BOTTOM_Y - top);
+        lv_obj_set_height(s_hint_label, TEXT_ONLY_BOTTOM_Y - top);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_TOP_MID, 0, top);
@@ -448,7 +512,7 @@ static void create_status_ui(void)
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_line_space(s_hint_label, TEXT_LINE_SPACE, 0);
+    lv_obj_set_style_text_line_space(s_hint_label, TEXT_STEP_SMALLEST.line_space, 0);
     lv_obj_set_width(s_hint_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x7f7180), 0);
