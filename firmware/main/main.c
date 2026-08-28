@@ -9,6 +9,7 @@
 #include "button_gpio.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -57,6 +58,16 @@ static const char *TAG = "voice_stick";
 #define CANCEL_TONE_WAIT_MS 600
 
 static bool s_recording;
+/*
+ * Die Uhr ueberlebt den Tiefschlaf — halb von selbst, halb von Hand.
+ *
+ * Die Systemuhr laeuft im Tiefschlaf weiter, der RTC-Zeitgeber haelt sie. Der
+ * Abstand zur Ortszeit lag dagegen im normalen RAM und waere weg; im
+ * RTC-Speicher ueberlebt er. Ohne ihn zeigte das Geraet nach jedem Aufwachen
+ * UTC — und das faellt in Deutschland erst im Winter auf, wenn es stimmt.
+ */
+static RTC_DATA_ATTR int32_t s_clock_offset_min;
+static RTC_DATA_ATTR bool s_clock_valid;
 static bool s_ota_updating;
 static bool s_display_dimmed;
 static bool s_recording_pm_locked;
@@ -141,12 +152,16 @@ typedef enum {
     APP_EVENT_HOST_RESPONSE_TIMEOUT,
     APP_EVENT_RECORDING_TICK,
     APP_EVENT_DEVICE_NAME,
+    APP_EVENT_TIME,
 } app_event_type_t;
 
 typedef struct {
     app_event_type_t type;
     uint32_t written;
     uint32_t size;
+    /* Nur fuer APP_EVENT_TIME: UTC-Sekunden und Abstand der Ortszeit. */
+    int64_t epoch;
+    int32_t tz_offset_min;
     char state[32];
     /*
      * 192 statt 96 Byte: die Funkstrecke traegt 244 je Schreibvorgang
@@ -185,6 +200,7 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
 
 static void queue_ui_state_event(const char *state, const char *text);
 static void queue_device_name_event(const char *name);
+static void queue_time_event(int64_t epoch, int32_t tz_offset_min);
 static void apply_interaction_mode(interaction_mode_t mode);
 
 static bool is_external_powered(void)
@@ -613,6 +629,27 @@ static void queue_device_name_event(const char *name)
     }
 }
 
+/*
+ * Die Uhrzeit kommt von der Bruecke — das Geraet hat weder RTC-Baustein noch
+ * WLAN, und eine geratene Uhrzeit auf dem Handgelenk waere schlimmer als
+ * keine. Ueber die Warteschlange wie alles andere, damit die Anzeige aus
+ * einem Strang bedient wird.
+ */
+static void queue_time_event(int64_t epoch, int32_t tz_offset_min)
+{
+    if (!s_app_event_queue) {
+        return;
+    }
+    app_event_t event = {
+        .type = APP_EVENT_TIME,
+        .epoch = epoch,
+        .tz_offset_min = tz_offset_min,
+    };
+    if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "drop time: app queue full");
+    }
+}
+
 static void front_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
@@ -659,9 +696,21 @@ static void ble_control_cb(const char *json)
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
     const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "name");
+    const cJSON *epoch = cJSON_GetObjectItemCaseSensitive(root, "epoch");
+    const cJSON *tz_offset = cJSON_GetObjectItemCaseSensitive(root, "tz_offset_min");
     if (cJSON_IsString(event) && strcmp(event->valuestring, "device_name") == 0 &&
         cJSON_IsString(name)) {
         queue_device_name_event(name->valuestring);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "time") == 0 &&
+               cJSON_IsNumber(epoch)) {
+        /*
+         * `valuedouble`, nicht `valueint`: cJSON legt Ganzzahlen zusaetzlich
+         * als int ab, und der laeuft bei Sekunden seit 1970 auf 32-Bit-Zielen
+         * ueber. Die Sekunde ist auf diesem Weg ohnehin die kleinste Einheit,
+         * die Rundung des double liegt weit darunter.
+         */
+        queue_time_event((int64_t)epoch->valuedouble,
+                         cJSON_IsNumber(tz_offset) ? (int32_t)tz_offset->valuedouble : 0);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "");
@@ -966,6 +1015,13 @@ static void app_event_task(void *arg)
             stop_host_response_timer();
             ui_status_set_idle();
             note_activity();
+            break;
+        case APP_EVENT_TIME:
+            s_clock_offset_min = event.tz_offset_min;
+            s_clock_valid = true;
+            ui_status_set_clock(event.epoch, event.tz_offset_min);
+            ESP_LOGI(TAG, "Uhr gestellt: %lld UTC, Ortszeit %+d min",
+                     (long long)event.epoch, (int)event.tz_offset_min);
             break;
         case APP_EVENT_DEVICE_NAME:
             if (event.text[0]) {
@@ -1297,6 +1353,10 @@ void app_main(void)
     ESP_ERROR_CHECK(init_host_response_timer());
     ESP_ERROR_CHECK(init_recording_tick_timer());
     ESP_ERROR_CHECK(audio_tone_init());
+    if (s_clock_valid) {
+        /* Aus dem Tiefschlaf zurueck: Zeit lief weiter, der Abstand kommt aus dem RTC-Speicher. */
+        ui_status_restore_clock(s_clock_offset_min);
+    }
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);

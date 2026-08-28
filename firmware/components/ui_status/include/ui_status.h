@@ -18,6 +18,10 @@ void ui_status_show_last_answer(void);
 void ui_status_set_cancelled(void);
 void ui_status_set_press_too_short(void);
 void ui_status_set_link(bool connected);
+/* Uhrzeit von der Bruecke: UTC-Sekunden plus Abstand der Ortszeit in Minuten. */
+void ui_status_set_clock(int64_t epoch_utc, int32_t tz_offset_min);
+/* Nach dem Tiefschlaf: nur der Abstand kommt zurueck, die Systemuhr lief weiter. */
+void ui_status_restore_clock(int32_t tz_offset_min);
 void ui_status_set_recording_meter(uint8_t level_percent, uint8_t remaining_percent);
 void ui_status_set_recording(uint32_t session_id);
 void ui_status_set_battery(int level_percent, bool charging, bool usb_powered);
