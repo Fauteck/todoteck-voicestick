@@ -24,6 +24,7 @@
 #include "stick_s3_board.h"
 #include "ui_status.h"
 #include "voice_ble.h"
+#include "wrist_wake.h"
 
 static const char *TAG = "voice_stick";
 
@@ -153,6 +154,7 @@ typedef enum {
     APP_EVENT_RECORDING_TICK,
     APP_EVENT_DEVICE_NAME,
     APP_EVENT_TIME,
+    APP_EVENT_WRIST_RAISE,
 } app_event_type_t;
 
 typedef struct {
@@ -317,6 +319,8 @@ static void note_activity(void)
         } else {
             s_display_dimmed = false;
             ui_status_set_idle_dimmed(false);
+            /* Heller Schirm: nichts aufzuwecken, also auch nicht messen. */
+            wrist_wake_watch(false);
         }
     }
     restart_display_dim_timer();
@@ -375,6 +379,10 @@ static void enter_deep_sleep(void)
              wake_gpio, gpio_get_level(wake_gpio));
     release_recording_pm_locks();
     ESP_ERROR_CHECK_WITHOUT_ABORT(ui_status_set_brightness(0));
+    /* Erst hier, nicht oben: Wird der Schlaf doch abgesagt (Aufnahme, OTA,
+       Netzteil), soll die Geste weiterlaufen statt bis zum naechsten
+       Abdunkeln tot zu sein. */
+    wrist_wake_prepare_deep_sleep();
     ui_status_prepare_deep_sleep();
     stick_s3_board_prepare_deep_sleep();
 
@@ -627,6 +635,16 @@ static void queue_device_name_event(const char *name)
     if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
         ESP_LOGW(TAG, "drop device_name: app queue full");
     }
+}
+
+/*
+ * Das Handgelenk wurde angehoben. Laeuft im Abfrage-Task des Sensors, geht
+ * deshalb ueber dieselbe Warteschlange wie die Tasten — die Anzeige wird nur
+ * aus einem Strang bedient.
+ */
+static void wrist_raise_cb(void)
+{
+    queue_app_event(APP_EVENT_WRIST_RAISE);
 }
 
 /*
@@ -1016,6 +1034,15 @@ static void app_event_task(void *arg)
             ui_status_set_idle();
             note_activity();
             break;
+        case APP_EVENT_WRIST_RAISE:
+            /*
+             * Dasselbe wie ein Tastendruck, nur ohne Taste: heller Schirm,
+             * Zeitgeber fuer Abdunkeln und Tiefschlaf von vorn. Kein
+             * Szenenwechsel — wer aufs Handgelenk schaut, will sehen, was
+             * ohnehin dasteht.
+             */
+            note_activity();
+            break;
         case APP_EVENT_TIME:
             s_clock_offset_min = event.tz_offset_min;
             s_clock_valid = true;
@@ -1170,6 +1197,8 @@ static void display_dim_timer_cb(void *arg)
         if (err == ESP_OK) {
             s_display_dimmed = true;
             ui_status_set_idle_dimmed(true);
+            /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
+            wrist_wake_watch(true);
             ESP_LOGI(TAG, "display dimmed after inactivity");
         } else {
             ESP_LOGW(TAG, "dim display failed: %s", esp_err_to_name(err));
@@ -1353,6 +1382,8 @@ void app_main(void)
     ESP_ERROR_CHECK(init_host_response_timer());
     ESP_ERROR_CHECK(init_recording_tick_timer());
     ESP_ERROR_CHECK(audio_tone_init());
+    /* Ohne Sensor faellt nur die Geste weg — der Rueckgabewert ist deshalb kein Abbruchgrund. */
+    (void)wrist_wake_init(wrist_raise_cb);
     if (s_clock_valid) {
         /* Aus dem Tiefschlaf zurueck: Zeit lief weiter, der Abstand kommt aus dem RTC-Speicher. */
         ui_status_restore_clock(s_clock_offset_min);

@@ -1,0 +1,6 @@
+dependencies:
+  # Der offizielle Espressif-Treiber statt eines eigenen: Der BMI270 laeuft
+  # nach dem Einschalten nicht los, er will erst eine acht Kilobyte grosse
+  # Konfigurationsdatei von Bosch geladen bekommen. Die liegt in diesem
+  # Baustein und muss so nicht als Zahlenkolonne in diesem Repo stehen.
+  espressif/bmi270: "^1.1.0"
