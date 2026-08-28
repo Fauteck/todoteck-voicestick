@@ -247,6 +247,33 @@ static void create_battery_ui(lv_obj_t *screen)
     lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, 4);
 }
 
+/*
+ * Layoutmasse im Inhaltsbereich: 240x135 abzueglich 8 Pixel Rand ringsum.
+ *
+ * Im Querformat stehen Figur und Text **nebeneinander** statt uebereinander:
+ * Tecki links in einer festen Spalte, rechts daneben Statuszeile und Text.
+ * Hochkant war die Reihenfolge von oben nach unten die einzig moegliche; hier
+ * waere sie die schlechtere, weil 119 Pixel Hoehe fuer Figur *und* mehrere
+ * Textzeilen nicht reichen — die Figur allein braucht schon mehr als die
+ * Haelfte davon.
+ */
+#define CONTENT_W (LCD_H_RES - 16)
+#define CONTENT_H (LCD_V_RES - 16)
+
+/* Kopfzeile: Name und Verbindungspunkt links, Akku rechts. */
+#define HEADER_H 16
+
+/*
+ * Die Spalte fuer Tecki. Muss zu ICON_BOX in ui_status_icons.c passen — dort
+ * steht dieselbe Zahl, und sie ist dort die einzige, aus der die Figur
+ * faellt.
+ */
+#define TECKI_BOX 64
+#define COL_GAP 10
+/* Linke Kante und Breite der Textspalte neben der Figur. */
+#define COL_X (TECKI_BOX + COL_GAP)
+#define COL_W (CONTENT_W - COL_X)
+
 #define METER_WIDTH 130
 #define METER_LEVEL_HEIGHT 6
 #define METER_TIME_HEIGHT 3
@@ -300,33 +327,6 @@ static void create_meters(lv_obj_t *screen)
     lv_obj_set_style_bg_color(s_time_fill, lv_color_hex(0xf2b23c), 0);
     lv_obj_align(s_time_fill, LV_ALIGN_LEFT_MID, 0, 0);
 }
-
-/*
- * Layoutmasse im Inhaltsbereich: 240x135 abzueglich 8 Pixel Rand ringsum.
- *
- * Im Querformat stehen Figur und Text **nebeneinander** statt uebereinander:
- * Tecki links in einer festen Spalte, rechts daneben Statuszeile und Text.
- * Hochkant war die Reihenfolge von oben nach unten die einzig moegliche; hier
- * waere sie die schlechtere, weil 119 Pixel Hoehe fuer Figur *und* mehrere
- * Textzeilen nicht reichen — die Figur allein braucht schon mehr als die
- * Haelfte davon.
- */
-#define CONTENT_W (LCD_H_RES - 16)
-#define CONTENT_H (LCD_V_RES - 16)
-
-/* Kopfzeile: Name und Verbindungspunkt links, Akku rechts. */
-#define HEADER_H 16
-
-/*
- * Die Spalte fuer Tecki. Muss zu ICON_BOX in ui_status_icons.c passen — dort
- * steht dieselbe Zahl, und sie ist dort die einzige, aus der die Figur
- * faellt.
- */
-#define TECKI_BOX 64
-#define COL_GAP 10
-/* Linke Kante und Breite der Textspalte neben der Figur. */
-#define COL_X (TECKI_BOX + COL_GAP)
-#define COL_W (CONTENT_W - COL_X)
 
 /*
  * Unterkante des Texts. Eine fuer beide Faelle: Ob er neben Tecki in der
