@@ -70,7 +70,30 @@ static const char *TAG = "ui_status";
 #define LCD_BACKLIGHT_PWM_MAX 255
 #define LCD_BACKLIGHT_DEFAULT 128
 
-#define LVGL_DRAW_BUF_LINES 24
+/*
+ * Wie viele Bildzeilen ein Zeichenpuffer fasst — und warum die Zahl beim
+ * Querformat kleiner werden musste.
+ *
+ * Zwei dieser Puffer liegen dauerhaft im **DMA-faehigen internen** RAM, und
+ * aus demselben Topf holt sich der Aufnahmepfad bei jedem Tastendruck seinen
+ * 32-KB-Stack und die I2S-Puffer. Die Rechnung:
+ *
+ *   hochkant, 24 Zeilen:  135 * 24 * 2 Byte * 2 = 12.960 Byte
+ *   quer,     24 Zeilen:  240 * 24 * 2 Byte * 2 = 23.040 Byte
+ *   quer,     10 Zeilen:  240 * 10 * 2 Byte * 2 =  9.600 Byte
+ *
+ * Die Drehung allein haette den Puffer also verdoppelt: gut zehn Kilobyte
+ * dauerhaft weniger fuer alles andere. Das Ergebnis stand auf dem Display —
+ * "Aufnahme startet nicht: ESP_ERR_NO_MEM", bei jedem Tastendruck. Mit zehn
+ * Zeilen liegt der Verbrauch wieder unter dem der hochkanten Fassung, und der
+ * Platz reicht auch fuer den Sensor-Task der Handgelenk-Geste.
+ *
+ * Der Preis sind mehr Uebertragungen je Bild (14 statt 6 fuer den vollen
+ * Schirm). Bei 20 MHz kostet ein voller Schirm so oder so rund 26 ms SPI-Zeit;
+ * was dazukommt, ist der Aufwand je Uebertragung, und der faellt neben einem
+ * Geraet, das sonst gar nicht aufnimmt, nicht ins Gewicht.
+ */
+#define LVGL_DRAW_BUF_LINES 10
 #define LVGL_TICK_PERIOD_MS 10
 #define LVGL_TASK_MAX_DELAY_MS 500
 #define LVGL_TASK_MIN_DELAY_MS (1000 / CONFIG_FREERTOS_HZ)
