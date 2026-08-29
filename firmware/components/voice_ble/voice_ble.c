@@ -912,7 +912,7 @@ esp_err_t voice_ble_send_device_info(void)
              "\"buttons\":[\"primary\",\"secondary\"],"
              "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
              "\"ui_states\":[\"ready\",\"recording\",\"thinking\","
-             "\"pending_confirmation\",\"error\"]}",
+             "\"pending_confirmation\",\"error\",\"no_speech\"]}",
              version);
     return send_state_json(json);
 }

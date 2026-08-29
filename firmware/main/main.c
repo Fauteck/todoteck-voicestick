@@ -108,6 +108,18 @@ typedef enum {
     APP_UI_STATE_THINKING,
     APP_UI_STATE_PENDING_CONFIRMATION,
     APP_UI_STATE_ERROR,
+    /*
+     * Der Turn lief durch, es wurde nur nichts gesagt: Die Aufnahme war
+     * still, oder die Erkennung hat aus der Stille einen Satz erfunden. Der
+     * Server faengt beides ab und schickt diesen Zustand statt einer
+     * Antwort.
+     *
+     * Ein eigener Zustand und kein Fehler, weil beides verschieden ist: Ein
+     * Fehler heisst "etwas ist kaputt", das hier heisst "die Taste hat in
+     * der Tasche ausgeloest". Bruecken, die ihn nicht kennen, schicken
+     * weiterhin "error" -- das Geraet zeigt dann eben den Fehler-Zustand.
+     */
+    APP_UI_STATE_NO_SPEECH,
 } app_ui_state_t;
 
 static app_ui_state_t s_app_ui_state = APP_UI_STATE_READY;
@@ -132,6 +144,8 @@ static const char *app_ui_state_name(app_ui_state_t state)
         return "pending_confirmation";
     case APP_UI_STATE_ERROR:
         return "error";
+    case APP_UI_STATE_NO_SPEECH:
+        return "no_speech";
     }
     return "unknown";
 }
@@ -837,6 +851,17 @@ static void apply_app_ui_state(const char *state, const char *text)
         s_app_ui_state = APP_UI_STATE_ERROR;
         ui_status_set_error(text && text[0] ? text : "Unbekannter Fehler");
         play_tone(AUDIO_TONE_ERROR);
+    } else if (strcmp(state, "no_speech") == 0) {
+        s_app_ui_state = APP_UI_STATE_NO_SPEECH;
+        ui_status_set_no_speech(text);
+        /*
+         * Derselbe kurze tiefe Ton wie bei einer verworfenen Aufnahme, nicht
+         * die zwei absteigenden des Fehlers: Am Ohr soll "es kam nichts an"
+         * klingen wie "verworfen" und nicht wie "kaputt".
+         */
+        play_tone(AUDIO_TONE_CANCEL);
+        note_activity();
+        voice_ble_request_slow_interval();
     } else {
         ESP_LOGW(TAG, "unknown ui_state %s", state);
     }
