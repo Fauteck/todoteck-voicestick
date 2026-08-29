@@ -138,13 +138,14 @@ typedef enum {
     UI_TEXT_MESSAGE,
 } ui_text_kind_t;
 
+/* Das Zustandswort ueber dem Text: "Bereit", "Koppeln", "Nichts gehoert". */
+#define UI_STATUS_TEXT_MAX 32
 /*
- * 64 statt 32: Seit die Statuszeile im Verlauf die **Frage** traegt und nicht
- * mehr nur ein Zustandswort ("Bereit", "Koppeln"), ist sie der laengste Text
- * auf dem Schirm, der noch in eine Zeile muss. Abgeschnitten wird er beim
- * Zeichnen mit Auslassungspunkten, nicht schon beim Speichern.
+ * Die Frage, die anstelle des Zustandsworts stehen kann. Dieselbe Zahl wie das
+ * Budget der Bruecke (`VoiceProtocol.QUESTION_BUDGET_BYTES`) — was sie schickt,
+ * passt damit ohne Rest hier hinein.
  */
-#define UI_STATUS_TEXT_MAX 64
+#define UI_QUESTION_MAX 64
 #define UI_HINT_TEXT_MAX 192
 
 static _lock_t s_lvgl_lock;
@@ -167,6 +168,12 @@ static ui_status_icon_scene_t s_scene = UI_STATUS_ICON_BOOT;
 static ui_text_kind_t s_text_kind = UI_TEXT_HINT;
 static char s_status_text[UI_STATUS_TEXT_MAX] = "Startet";
 static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
+/*
+ * Die verstandene Frage zur angezeigten Antwort. Sie steht anstelle des
+ * Zustandsworts ueber dem Text — klein und zweizeilig, siehe QUESTION_H.
+ * Leer heisst: Es gab keine, dann traegt die Zeile wie bisher das Wort.
+ */
+static char s_question_text[UI_QUESTION_MAX];
 static char s_device_name[24] = "BLE";
 static bool s_dimmed;
 /*
@@ -212,7 +219,6 @@ static lv_color_t s_muted_colour;
  * Eintrag nur die Antwort, und die Statuszeile faellt auf "Verlauf" zurueck.
  */
 #define UI_HISTORY_MAX 5
-#define UI_QUESTION_MAX 64
 
 typedef struct {
     char question[UI_QUESTION_MAX];
@@ -501,13 +507,36 @@ static const text_step_t TEXT_STEPS[] = {
 #define TEXT_STEP_SMALLEST (TEXT_STEPS[TEXT_STEP_COUNT - 1])
 
 typedef struct {
-    bool tecki;             /* bleibt die Figur stehen? */
-    const lv_font_t *font;  /* Schrift des unteren Texts */
-    int32_t line_space;     /* Zeilenabstand dazu */
-    int32_t status_y;       /* Oberkante der Statuszeile */
-    int32_t x;              /* linke Kante von Statuszeile und Text */
-    int32_t width;          /* Breite beider */
+    bool tecki;                    /* bleibt die Figur stehen? */
+    const lv_font_t *font;         /* Schrift des unteren Texts */
+    int32_t line_space;            /* Zeilenabstand dazu */
+    int32_t status_y;              /* Oberkante der Kopfzeile ueber dem Text */
+    int32_t x;                     /* linke Kante von Kopfzeile und Text */
+    int32_t width;                 /* Breite beider */
+    const lv_font_t *status_font;  /* Schrift der Kopfzeile */
+    int32_t status_h;              /* Hoehe, die sie belegt */
 } text_layout_t;
+
+/*
+ * Die Zeile ueber dem Text traegt zweierlei, und beides braucht eine andere
+ * Schrift.
+ *
+ * Ein **Zustandswort** ("Bereit", "Abgebrochen", "Koppeln") ist kurz und die
+ * Ueberschrift des Schirms: halbfette 16, eine Zeile. Eine **Frage** ist ein
+ * ganzer diktierter Satz und die Bildunterschrift zur Antwort darunter --
+ * klein, gedaempft, zwei Zeilen.
+ *
+ * Der Unterschied ist nicht kosmetisch, er entscheidet, ob die Zeile ueberhaupt
+ * etwas sagt: In der 16er passen in die 150 Pixel breite Spalte rund sechzehn
+ * Zeichen, aus "Leg eine Aufgabe an, Pool rueckspuelen" wird also "Leg eine
+ * Aufgabe...". In der 11er auf zwei Zeilen sind es rund siebzig -- genug fuer
+ * den ganzen Satz, und genau der macht einen Verlaufseintrag
+ * wiedererkennbar.
+ */
+#define QUESTION_LINES 2
+#define QUESTION_LINE_SPACE 1
+#define QUESTION_H (QUESTION_LINES * todoteck_font_11.line_height + \
+                    (QUESTION_LINES - 1) * QUESTION_LINE_SPACE)
 
 static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
 {
@@ -547,9 +576,13 @@ static const text_step_t *largest_step_fitting(const char *text, int32_t room, i
  * Im Querformat faellt die Entscheidung seltener gegen Tecki als hochkant:
  * Die Spalte ist mit 150 Pixeln breiter als frueher der ganze Schirm.
  */
-static text_layout_t plan_text_layout(const char *status, const char *text, ui_text_kind_t kind)
+static text_layout_t plan_text_layout(const char *status, const char *question,
+                                      const char *text, ui_text_kind_t kind)
 {
-    const int32_t status_h = status && status[0] ? todoteck_font_16.line_height : 0;
+    const bool with_question = question && question[0];
+    const lv_font_t *status_font = with_question ? &todoteck_font_11 : &todoteck_font_16;
+    const int32_t full_status_h = with_question ? QUESTION_H : todoteck_font_16.line_height;
+    const int32_t status_h = (with_question || (status && status[0])) ? full_status_h : 0;
     const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
     const int32_t room_beside_tecki = TEXT_BOTTOM_Y - top_beside;
 
@@ -557,27 +590,27 @@ static text_layout_t plan_text_layout(const char *status, const char *text, ui_t
         const text_step_t *step = largest_step_fitting(text, room_beside_tecki, COL_W);
         if (step) {
             return (text_layout_t){ true, step->font, step->line_space, STATUS_Y_WITH_TECKI,
-                                    COL_X, COL_W };
+                                    COL_X, COL_W, status_font, status_h };
         }
     } else if (text_height(text, &TEXT_STEP_SMALLEST, COL_W) <= room_beside_tecki) {
         /* Beiwerk bleibt klein und gedaempft, auch wenn Platz waere. */
         return (text_layout_t){ true, TEXT_STEP_SMALLEST.font, TEXT_STEP_SMALLEST.line_space,
-                                STATUS_Y_WITH_TECKI, COL_X, COL_W };
+                                STATUS_Y_WITH_TECKI, COL_X, COL_W, status_font, status_h };
     }
 
     /*
-     * Ohne Figur: Statuszeile nach oben unter die Kopfzeile, der Rest gehoert
-     * dem Text ueber die volle Breite. Die Zeile wird immer eingerechnet, auch
+     * Ohne Figur: Kopfzeile nach oben unter den Kopf, der Rest gehoert dem
+     * Text ueber die volle Breite. Die Zeile wird immer eingerechnet, auch
      * wenn sie gerade leer ist — sonst spraenge das Layout, sobald sie doch
      * etwas traegt.
      */
-    const int32_t top = STATUS_Y_TEXT_ONLY + todoteck_font_16.line_height + TEXT_GAP;
+    const int32_t top = STATUS_Y_TEXT_ONLY + full_status_h + TEXT_GAP;
     const text_step_t *step = largest_step_fitting(text, TEXT_BOTTOM_Y - top, CONTENT_W);
     if (!step) {
         step = &TEXT_STEP_SMALLEST;
     }
     return (text_layout_t){ false, step->font, step->line_space, STATUS_Y_TEXT_ONLY,
-                            0, CONTENT_W };
+                            0, CONTENT_W, status_font, full_status_h };
 }
 
 /*
@@ -657,7 +690,8 @@ static void apply_battery_colour_locked(void)
                                 0);
 }
 
-static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
+static void render_scene_locked(ui_status_icon_scene_t scene, const char *status,
+                                const char *question, const char *hint)
 {
     if (!s_ready) {
         return;
@@ -677,7 +711,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     ui_status_icons_apply(&s_icons, scene);
 
     const char *body_text = hint ? hint : "";
-    const text_layout_t plan = plan_text_layout(status, body_text, s_text_kind);
+    const char *question_text = (question && question[0] && !clock_only) ? question : "";
+    const text_layout_t plan = plan_text_layout(status, question_text, body_text, s_text_kind);
 
     /*
      * Ohne Tecki traegt die Statuszeile allein, dass etwas schiefging — die
@@ -690,8 +725,28 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     }
 
     ui_status_icons_show(&s_icons, clock_only || plan.tecki);
-    lv_label_set_text(s_status_label, clock_only ? "" : status_shown);
+
+    /*
+     * Die Zeile ueber dem Text: die Frage, wenn es eine gibt, sonst das
+     * Zustandswort. Beides zugleich waere eine Zeile zu viel — die Frage sagt
+     * ohnehin schon, dass eine Antwort da ist.
+     *
+     * Die Anfuehrungszeichen sind das einzige, was die Frage als Zitat
+     * ausweist: "Pool ruecksuepelen am Samstag" ueber "Aufgabe angelegt: ..."
+     * liesse sonst offen, welcher der beiden Saetze vom Geraet kommt.
+     */
+    char quoted[UI_QUESTION_MAX + 3] = "";
+    if (question_text[0]) {
+        snprintf(quoted, sizeof(quoted), "\"%s\"", question_text);
+    }
+    lv_label_set_text(s_status_label, clock_only ? "" :
+                      (question_text[0] ? quoted : status_shown));
+    lv_obj_set_style_text_font(s_status_label, plan.status_font, 0);
+    lv_obj_set_style_text_line_space(s_status_label, QUESTION_LINE_SPACE, 0);
     lv_obj_set_width(s_status_label, plan.width);
+    lv_obj_set_height(s_status_label, plan.status_font->line_height *
+                      (question_text[0] ? QUESTION_LINES : 1) +
+                      (question_text[0] ? QUESTION_LINE_SPACE : 0));
     lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, plan.x,
                  with_clock ? CLOCK_STATUS_Y : plan.status_y);
 
@@ -727,14 +782,14 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x,
-                     plan.status_y + todoteck_font_16.line_height + TEXT_GAP);
+                     plan.status_y + plan.status_h + TEXT_GAP);
     } else {
         /*
          * Feste Hoehe mit LV_LABEL_LONG_DOT: Was selbst in der kleinen
          * Schrift nicht mehr auf den Schirm passt, endet mit Auslassungs-
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
-        const int32_t top = plan.status_y + todoteck_font_16.line_height + TEXT_GAP;
+        const int32_t top = plan.status_y + plan.status_h + TEXT_GAP;
         lv_obj_set_height(s_hint_label, TEXT_BOTTOM_Y - top);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
@@ -784,7 +839,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_bg_opa(s_ble_dot, s_link_connected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
-    lv_obj_set_style_text_color(s_status_label, text, 0);
+    lv_obj_set_style_text_color(s_status_label, question_text[0] ? muted : text, 0);
     lv_obj_set_style_text_color(s_clock_label, text, 0);
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     s_muted_colour = muted;
@@ -808,11 +863,11 @@ static void render_current_locked(void)
         strlcpy(position, s_position_text, sizeof(position));
         s_text_kind = UI_TEXT_HINT;
         s_position_text[0] = '\0';
-        render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "");
+        render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "", "");
         s_text_kind = kind;
         strlcpy(s_position_text, position, sizeof(s_position_text));
     } else {
-        render_scene_locked(s_scene, s_status_text, s_hint_text);
+        render_scene_locked(s_scene, s_status_text, s_question_text, s_hint_text);
     }
 }
 
@@ -1048,13 +1103,15 @@ static void copy_utf8_display(char *dst, const char *src, size_t size)
     dst[out] = '\0';
 }
 
-static void set_scene_at(ui_status_icon_scene_t scene, const char *status, const char *hint,
-                         ui_text_kind_t kind, const char *position)
+static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
+                           const char *question, const char *hint, ui_text_kind_t kind,
+                           const char *position)
 {
     _lock_acquire(&s_lvgl_lock);
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
+    copy_utf8_display(s_question_text, question ? question : "", sizeof(s_question_text));
     copy_utf8_display(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
     strlcpy(s_position_text, position ? position : "", sizeof(s_position_text));
     render_current_locked();
@@ -1062,14 +1119,14 @@ static void set_scene_at(ui_status_icon_scene_t scene, const char *status, const
 }
 
 /*
- * Jede Szene ausser dem Blaettern raeumt die Verlaufsposition weg: Sie steht
- * fuer "du bist im Verlauf", und sobald etwas anderes auf dem Schirm ist,
- * stimmt das nicht mehr.
+ * Jede Szene ausser dem Blaettern raeumt Frage und Verlaufsposition weg: Sie
+ * stehen fuer "du siehst eine Antwort" beziehungsweise "du bist im Verlauf",
+ * und sobald etwas anderes auf dem Schirm ist, stimmt beides nicht mehr.
  */
 static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint,
                       ui_text_kind_t kind)
 {
-    set_scene_at(scene, status, hint, kind, "");
+    set_scene_full(scene, status, "", hint, kind, "");
 }
 
 esp_err_t ui_status_init(void)
@@ -1254,11 +1311,11 @@ void ui_status_set_idle(void)
  * rueckspuelen") unsichtbar: sie kam schon immer ueber die Funkstrecke, wurde
  * bei ready aber verworfen.
  *
- * `question` ist das, was die Bruecke verstanden hat. Sie steht als
- * Ueberschrift ueber der Antwort — und zwar sofort, nicht erst im Verlauf:
- * Wer eine falsch verstandene Frage gleich sieht, sagt sie noch einmal,
- * statt sich spaeter ueber die Aufgabe zu wundern. Schickt die Bruecke keine,
- * bleibt es beim alten "Bereit".
+ * `question` ist das, was die Bruecke verstanden hat. Sie steht in
+ * Anfuehrungszeichen ueber der Antwort — und zwar sofort, nicht erst im
+ * Verlauf: Wer eine falsch verstandene Frage gleich sieht, sagt sie noch
+ * einmal, statt sich spaeter ueber die Aufgabe zu wundern. Schickt die
+ * Bruecke keine, steht dort wie bisher "Bereit".
  */
 void ui_status_set_idle_text(const char *text, const char *question)
 {
@@ -1280,8 +1337,8 @@ void ui_status_set_idle_text(const char *text, const char *question)
     s_history_cursor = -1;
     _lock_release(&s_lvgl_lock);
 
-    set_scene(UI_STATUS_ICON_IDLE, (question && question[0]) ? question : "Bereit", text,
-              UI_TEXT_MESSAGE);
+    set_scene_full(UI_STATUS_ICON_IDLE, "Bereit", question ? question : "", text,
+                   UI_TEXT_MESSAGE, "");
 }
 
 /*
@@ -1333,8 +1390,8 @@ void ui_status_browse_history(void)
     _lock_release(&s_lvgl_lock);
 
     ESP_LOGD(TAG, "Verlauf %s", position);
-    set_scene_at(UI_STATUS_ICON_IDLE, question[0] ? question : "Verlauf", answer,
-                 UI_TEXT_MESSAGE, position);
+    set_scene_full(UI_STATUS_ICON_IDLE, "Verlauf", question, answer,
+                   UI_TEXT_MESSAGE, position);
 }
 
 /*
