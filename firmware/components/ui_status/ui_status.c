@@ -732,7 +732,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * ohnehin schon, dass eine Antwort da ist.
      *
      * Die Anfuehrungszeichen sind das einzige, was die Frage als Zitat
-     * ausweist: "Pool ruecksuepelen am Samstag" ueber "Aufgabe angelegt: ..."
+     * ausweist: "Pool rueckspuelen am Samstag" ueber "Aufgabe angelegt: ..."
      * liesse sonst offen, welcher der beiden Saetze vom Geraet kommt.
      */
     char quoted[UI_QUESTION_MAX + 3] = "";
