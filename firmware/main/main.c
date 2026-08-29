@@ -30,7 +30,14 @@
 static const char *TAG = "voice_stick";
 
 #define BATTERY_REFRESH_FALLBACK_MS (10 * 1000)
-#define DISPLAY_DIM_TIMEOUT_MS (30 * 1000)
+/*
+ * Abdunkeln nach 15 statt 30 Sekunden (08/2026). Der helle Schirm ist der
+ * teuerste Zustand des Geraets, und abgedunkelt bleibt die Uhrzeit lesbar --
+ * das Fenster, in dem beides gilt, darf deshalb kurz sein. Der Tiefschlaf
+ * bleibt bei fuenf Minuten: Aus ihm zurueck kostet einen Neustart samt neuer
+ * BLE-Verbindung, das Aufhellen dagegen nur einen Tastendruck.
+ */
+#define DISPLAY_DIM_TIMEOUT_MS (15 * 1000)
 #define DISPLAY_ACTIVE_BRIGHTNESS 128
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)

@@ -12,7 +12,7 @@
  * main.c nicht mehr aufgesetzt — siehe WRIST_WAKE_ENABLED dort. Alles
  * Folgende beschreibt, was passiert, wenn der Schalter wieder auf 1 steht.
  *
- * Warum ueberhaupt: Der Schirm dunkelt nach 30 Sekunden ab. Wer danach die
+ * Warum ueberhaupt: Der Schirm dunkelt nach 15 Sekunden ab. Wer danach die
  * Uhrzeit sehen will, musste bisher eine Taste druecken — mit der
  * anderen Hand, was am Handgelenk genau die Bewegung ist, die eine Uhr
  * ueberfluessig machen soll.
