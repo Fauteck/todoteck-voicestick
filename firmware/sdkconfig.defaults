@@ -28,10 +28,16 @@ CONFIG_LV_FONT_MONTSERRAT_10=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
-# Ziffernblatt: "07:42" ist reines ASCII, hier braucht es keine eigene Schrift.
-# 28 neben dem Wort "Koppeln", 48 wenn die Uhr den Schirm allein hat.
+# Kleines Ziffernblatt neben dem Wort "Koppeln": "07:42" ist reines ASCII,
+# hier braucht es keine eigene Schrift.
+#
+# Die 48er ist entfallen. Das grosse Ziffernblatt setzt seit 08/2026
+# `todoteck_clock_64` (ui_status/fonts) -- eine Schrift aus zwoelf Zeichen,
+# die deshalb bei gleicher Kastenhoehe deutlich groessere Ziffern zeigt als
+# eine vollstaendige. Die eingebaute 48er bringt dagegen den ganzen
+# Latin-Satz mit, von dem hier nie mehr als zehn Ziffern und ein Doppelpunkt
+# gebraucht wurden.
 CONFIG_LV_FONT_MONTSERRAT_28=y
-CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 

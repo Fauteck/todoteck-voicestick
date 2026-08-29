@@ -10,11 +10,12 @@ void ui_status_prepare_deep_sleep(void);
 void ui_status_set_device_name(const char *device_name);
 void ui_status_set_advertising(void);
 void ui_status_set_pairing(const char *device_name);
-void ui_status_set_idle_hint(const char *hint);
 void ui_status_set_idle(void);
-void ui_status_set_idle_text(const char *text);
+/* Antwort der Bruecke plus die verstandene Frage; beides wandert in den Verlauf. */
+void ui_status_set_idle_text(const char *text, const char *question);
 void ui_status_set_idle_dimmed(bool dimmed);
-void ui_status_show_last_answer(void);
+/* Einen Schritt zurueck durch die letzten Fragen und Antworten. */
+void ui_status_browse_history(void);
 void ui_status_set_cancelled(void);
 void ui_status_set_press_too_short(void);
 void ui_status_set_no_speech(const char *hint);

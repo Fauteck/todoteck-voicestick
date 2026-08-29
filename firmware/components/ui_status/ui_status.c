@@ -109,6 +109,15 @@ static const char *TAG = "ui_status";
  * lv_font_conv aus Montserrat erzeugt und decken zusaetzlich Latin-1 ab,
  * also Umlaute und Eszett.
  */
+/*
+ * Die Schrift des Ziffernblatts. Nur Ziffern, Doppelpunkt und Bindestrich —
+ * mehr steht dort nie, und ein voller Latin-1-Satz in dieser Groesse kostete
+ * ein Vielfaches an Flash. `line_height` faellt dadurch auf 47 Pixel: Die
+ * Schrift kennt weder Ober- noch Unterlaengen, die sie einrechnen muesste,
+ * und die Ziffern werden bei gleicher Kastenhoehe entsprechend groesser als
+ * bei einer vollstaendigen Schrift derselben Stufe.
+ */
+LV_FONT_DECLARE(todoteck_clock_64);
 LV_FONT_DECLARE(todoteck_font_16);
 LV_FONT_DECLARE(todoteck_font_14);
 LV_FONT_DECLARE(todoteck_font_13);
@@ -129,7 +138,13 @@ typedef enum {
     UI_TEXT_MESSAGE,
 } ui_text_kind_t;
 
-#define UI_STATUS_TEXT_MAX 32
+/*
+ * 64 statt 32: Seit die Statuszeile im Verlauf die **Frage** traegt und nicht
+ * mehr nur ein Zustandswort ("Bereit", "Koppeln"), ist sie der laengste Text
+ * auf dem Schirm, der noch in eine Zeile muss. Abgeschnitten wird er beim
+ * Zeichnen mit Auslassungspunkten, nicht schon beim Speichern.
+ */
+#define UI_STATUS_TEXT_MAX 64
 #define UI_HINT_TEXT_MAX 192
 
 static _lock_t s_lvgl_lock;
@@ -141,6 +156,7 @@ static lv_obj_t *s_status_label;
 static lv_obj_t *s_hint_label;
 static lv_obj_t *s_clock_label;
 static lv_obj_t *s_battery_label;
+static lv_obj_t *s_position_label;
 static lv_obj_t *s_meter_track;
 static lv_obj_t *s_meter_fill;
 static lv_obj_t *s_time_track;
@@ -151,7 +167,6 @@ static ui_status_icon_scene_t s_scene = UI_STATUS_ICON_BOOT;
 static ui_text_kind_t s_text_kind = UI_TEXT_HINT;
 static char s_status_text[UI_STATUS_TEXT_MAX] = "Startet";
 static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
-static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Halten zum Sprechen";
 static char s_device_name[24] = "BLE";
 static bool s_dimmed;
 /*
@@ -178,11 +193,45 @@ static bool s_battery_charging;
 /* Gedaempfte Farbe der laufenden Szene — hell auf Creme, blass auf Dunkel. */
 static lv_color_t s_muted_colour;
 /*
- * Die letzte Antwort ueberlebt den Bildschirmwechsel: nach Ruhezustand oder
- * Fehler ist sie sonst weg, obwohl man sie vielleicht nur nicht rechtzeitig
- * gelesen hat. Die Seitentaste holt sie zurueck.
+ * Der Verlauf: die letzten Fragen und Antworten, durch die die Blaettertaste
+ * zappt.
+ *
+ * Bis 08/2026 stand hier eine einzige Zeichenkette — die letzte Antwort, die
+ * ein Druck auf die damalige Seitentaste zurueckholte. Der Fall dahinter bleibt
+ * derselbe (der Schirm dimmt nach 30 Sekunden und schlaeft nach fuenf
+ * Minuten; wer erst danach hinsieht, hat nichts gelesen), er hoert nur nicht
+ * bei eins auf: Wer drei Sachen hintereinander diktiert und dann nachsieht,
+ * will alle drei.
+ *
+ * Fuenf Plaetze, weil der Ring hier vollstaendig im internen RAM liegt und
+ * jeder Platz 256 Byte kostet. Wer laenger zurueck muss, sieht in der App
+ * nach — dort steht der Verlauf ohnehin ungekuerzt.
+ *
+ * Die Frage kommt aus dem Steuerbefehl der Bruecke (Feld `question`). Bleibt
+ * sie leer — aeltere Bruecke, oder eine, die sie nicht schickt —, traegt der
+ * Eintrag nur die Antwort, und die Statuszeile faellt auf "Verlauf" zurueck.
  */
-static char s_last_answer[UI_HINT_TEXT_MAX];
+#define UI_HISTORY_MAX 5
+#define UI_QUESTION_MAX 64
+
+typedef struct {
+    char question[UI_QUESTION_MAX];
+    char answer[UI_HINT_TEXT_MAX];
+} ui_history_entry_t;
+
+static ui_history_entry_t s_history[UI_HISTORY_MAX];
+/* Wieviele Plaetze belegt sind und wohin der naechste Eintrag geht. */
+static uint8_t s_history_count;
+static uint8_t s_history_next;
+/*
+ * Wo das Blaettern gerade steht: -1 heisst "nicht im Verlauf", 0 die juengste
+ * Antwort, 1 die davor. Jeder neue Turn setzt ihn zurueck — sonst blaetterte
+ * der naechste Druck mitten in einem Verlauf weiter, den man vor zehn Minuten
+ * verlassen hat.
+ */
+static int8_t s_history_cursor = -1;
+/* "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt. */
+static char s_position_text[8];
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -271,11 +320,13 @@ static void create_battery_ui(lv_obj_t *screen)
 #define HEADER_H 16
 
 /*
- * Die Spalte fuer Tecki. Muss zu ICON_BOX in ui_status_icons.c passen — dort
- * steht dieselbe Zahl, und sie ist dort die einzige, aus der die Figur
- * faellt.
+ * Die Spalte fuer Tecki. Die Zahl steht in ui_status_icons.h, weil dort die
+ * ganze Figur aus ihr faellt — hier wird sie nur noch geerbt, damit Spalte
+ * und Figur nicht auseinanderlaufen koennen.
  */
-#define TECKI_BOX 64
+#define TECKI_BOX UI_TECKI_BOX
+/* Oberkante der Figur in ihrer Spalte. */
+#define TECKI_TOP_Y 35
 #define COL_GAP 10
 /* Linke Kante und Breite der Textspalte neben der Figur. */
 #define COL_X (TECKI_BOX + COL_GAP)
@@ -373,8 +424,28 @@ static void create_meters(lv_obj_t *screen)
  */
 #define CLOCK_STATUS_Y (HEADER_H + 4)
 #define CLOCK_Y (HEADER_H + 28)
-#define CLOCK_BIG_Y (HEADER_H + 14)
 #define CLOCK_HINT_Y (CONTENT_H - 22)
+
+/*
+ * Das Ziffernblatt (Bereit und Ruht) — die Anzeige, die das Geraet die meiste
+ * Zeit zeigt, und deshalb die einzige, die nichts Ueberfluessiges tragen darf.
+ *
+ * Weg ist "Halten zum Sprechen": Der Satz stand dort, seit die Firmware ein
+ * Geraet ohne Uhr war. Wer den Stick am Handgelenk traegt, hat ihn beim
+ * zweiten Mal gelesen und danach nie wieder gebraucht — den Hinweis, welche
+ * Taste spricht, gibt das Geraet ohnehin beim ersten Druck.
+ *
+ * Weg ist auch Teckis Spalte: Auf dem Ziffernblatt sitzt er klein in der
+ * unteren linken Ecke. Er sagt dort dasselbe wie vorher (Augen offen =
+ * bereit, geschlossen = ruht), nimmt der Uhrzeit aber nichts mehr weg.
+ *
+ * Die Uhrzeit bekommt dafuer die ganze Breite und eine eigene Schriftstufe:
+ * `todoteck_clock_64` misst "04:44" — die breiteste moegliche Uhrzeit — mit
+ * 189 von 224 Pixeln; das haelt auch die schmalste Stelle aus. Die Ziffern
+ * sind darin 47 Pixel hoch statt 35 wie bisher in Montserrat 48.
+ */
+#define CLOCK_FACE_TECKI_Y (CONTENT_H - UI_TECKI_BOX_SMALL)
+#define CLOCK_FACE_Y (HEADER_H + 14)
 /* Wie oft die Anzeige nachzieht. Sekunden zeigt sie nicht, Minuten genuegen. */
 #define CLOCK_TICK_MS 10000
 
@@ -512,11 +583,23 @@ static bool clock_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
 }
 
 /*
- * Ziffernblatt ohne Statuswort: "Bereit" und "Ruht" sagen nichts, was der
- * Schirm nicht ohnehin zeigt. "Koppeln" sagt etwas — das bleibt stehen.
+ * Das volle Ziffernblatt: kein Statuswort, kein Hinweis, Tecki klein in der
+ * Ecke. "Bereit" und "Ruht" sagen nichts, was der Schirm nicht ohnehin zeigt.
+ * "Koppeln" sagt etwas — das behaelt Wort, Hinweis und die grosse Figur.
  */
-static bool clock_only_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
+static bool clock_only_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind,
+                             const char *text)
 {
+    if (text && text[0]) {
+        /*
+         * Es gibt etwas zu sagen ("Abgebrochen — Nichts gesendet", "Zu kurz",
+         * "Nichts gehoert"). Dann bleibt es beim kleineren Zifferblatt mit
+         * Statuswort und Zeile darunter: Ein Geraet, das auf einen Abbruch
+         * hin nur die Uhrzeit zeigt, sieht aus, als haette es die Taste gar
+         * nicht bemerkt.
+         */
+        return false;
+    }
     return clock_scene(scene, kind) &&
            (scene == UI_STATUS_ICON_IDLE || scene == UI_STATUS_ICON_RESTING);
 }
@@ -565,6 +648,17 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         return;
     }
 
+    const bool with_clock = clock_scene(scene, s_text_kind);
+    const bool clock_only = clock_only_scene(scene, s_text_kind, hint);
+
+    /*
+     * Flaeche und Ecke vor dem Zeichnen: Auf dem Ziffernblatt schrumpft Tecki
+     * in die untere linke Ecke, sonst steht er in seiner Spalte. Erst danach
+     * apply(), weil das die Punkte in die Objekte schreibt.
+     */
+    ui_status_icons_set_box(&s_icons,
+                            clock_only ? UI_TECKI_BOX_SMALL : UI_TECKI_BOX,
+                            0, clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
     ui_status_icons_apply(&s_icons, scene);
 
     const char *body_text = hint ? hint : "";
@@ -580,10 +674,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         status_shown = "Fehler";
     }
 
-    const bool with_clock = clock_scene(scene, s_text_kind);
-    const bool clock_only = clock_only_scene(scene, s_text_kind);
-
-    ui_status_icons_show(&s_icons, plan.tecki);
+    ui_status_icons_show(&s_icons, clock_only || plan.tecki);
     lv_label_set_text(s_status_label, clock_only ? "" : status_shown);
     lv_obj_set_width(s_status_label, plan.width);
     lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, plan.x,
@@ -594,10 +685,10 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         format_clock(clock_text, sizeof(clock_text));
         lv_label_set_text(s_clock_label, clock_text);
         lv_obj_set_style_text_font(s_clock_label,
-                                   clock_only ? &lv_font_montserrat_48 : &lv_font_montserrat_28, 0);
-        lv_obj_set_width(s_clock_label, plan.width);
-        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, plan.x,
-                     clock_only ? CLOCK_BIG_Y : CLOCK_Y);
+                                   clock_only ? &todoteck_clock_64 : &lv_font_montserrat_28, 0);
+        lv_obj_set_width(s_clock_label, clock_only ? CONTENT_W : plan.width);
+        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, clock_only ? 0 : plan.x,
+                     clock_only ? CLOCK_FACE_Y : CLOCK_Y);
         lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
@@ -607,7 +698,10 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_text_font(s_hint_label, plan.font, 0);
     lv_obj_set_style_text_line_space(s_hint_label, plan.line_space, 0);
     lv_obj_set_width(s_hint_label, plan.width);
-    if (with_clock) {
+    if (clock_only) {
+        /* Das Ziffernblatt traegt keinen Hinweis mehr — siehe CLOCK_FACE_Y. */
+        lv_obj_add_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
+    } else if (with_clock) {
         /* Unter der Uhr, klein: der Hinweis ist hier das Beiwerk zum Zifferblatt. */
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
@@ -630,6 +724,18 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
+    }
+
+    if (!clock_only) {
+        lv_obj_remove_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Der Platz im Verlauf ("2/5") steht in der sonst leeren Kopfzeile. */
+    lv_label_set_text(s_position_label, s_position_text);
+    if (s_position_text[0]) {
+        lv_obj_remove_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
     }
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
@@ -667,6 +773,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_text_color(s_clock_label, text, 0);
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     s_muted_colour = muted;
+    lv_obj_set_style_text_color(s_position_label, muted, 0);
     apply_battery_colour_locked();
 
     ui_status_icons_start_anim(&s_icons, scene);
@@ -675,10 +782,20 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 static void render_current_locked(void)
 {
     if (s_dimmed) {
+        /*
+         * Der Ruhezustand zeigt nur die Uhr — auch dann, wenn gerade im
+         * Verlauf geblaettert wurde. Beides wird nur fuer diesen einen
+         * Durchgang beiseitegelegt und danach zurueckgesetzt: Beim Aufwachen
+         * soll wieder das stehen, was vorher da war.
+         */
         const ui_text_kind_t kind = s_text_kind;
+        char position[sizeof(s_position_text)];
+        strlcpy(position, s_position_text, sizeof(position));
         s_text_kind = UI_TEXT_HINT;
+        s_position_text[0] = '\0';
         render_scene_locked(UI_STATUS_ICON_RESTING, "Ruht", "");
         s_text_kind = kind;
+        strlcpy(s_position_text, position, sizeof(s_position_text));
     } else {
         render_scene_locked(s_scene, s_status_text, s_hint_text);
     }
@@ -719,8 +836,25 @@ static void create_status_ui(void)
     create_meters(s_screen);
     ui_status_icons_create(&s_icons, s_screen);
 
+    s_position_label = lv_label_create(s_screen);
+    lv_label_set_text(s_position_label, "");
+    lv_obj_set_style_text_font(s_position_label, &todoteck_font_10, 0);
+    lv_obj_set_style_text_color(s_position_label, lv_color_hex(0x7f7180), 0);
+    lv_obj_align(s_position_label, LV_ALIGN_TOP_LEFT, 14, 4);
+    lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
+
     s_status_label = lv_label_create(s_screen);
     lv_label_set_text(s_status_label, s_status_text);
+    /*
+     * Genau eine Zeile, der Rest mit Auslassungspunkten.
+     *
+     * Solange dort nur Zustandswoerter standen ("Bereit", "Koppeln"), war das
+     * egal. Im Verlauf traegt die Zeile die Frage, und die passt regelmaessig
+     * nicht: Ohne feste Hoehe wuerde sie umbrechen und in den Antworttext
+     * darunter laufen — plan_text_layout() rechnet mit genau einer Zeile.
+     */
+    lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_status_label, todoteck_font_16.line_height);
     lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, COL_W);
@@ -899,16 +1033,28 @@ static void copy_utf8_display(char *dst, const char *src, size_t size)
     dst[out] = '\0';
 }
 
-static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint,
-                      ui_text_kind_t kind)
+static void set_scene_at(ui_status_icon_scene_t scene, const char *status, const char *hint,
+                         ui_text_kind_t kind, const char *position)
 {
     _lock_acquire(&s_lvgl_lock);
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
     copy_utf8_display(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
+    strlcpy(s_position_text, position ? position : "", sizeof(s_position_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
+}
+
+/*
+ * Jede Szene ausser dem Blaettern raeumt die Verlaufsposition weg: Sie steht
+ * fuer "du bist im Verlauf", und sobald etwas anderes auf dem Schirm ist,
+ * stimmt das nicht mehr.
+ */
+static void set_scene(ui_status_icon_scene_t scene, const char *status, const char *hint,
+                      ui_text_kind_t kind)
+{
+    set_scene_at(scene, status, hint, kind, "");
 }
 
 esp_err_t ui_status_init(void)
@@ -1069,21 +1215,19 @@ void ui_status_set_pairing(const char *device_name)
               UI_TEXT_HINT);
 }
 
-void ui_status_set_idle_hint(const char *hint)
-{
-    _lock_acquire(&s_lvgl_lock);
-    copy_utf8_display(s_idle_hint_text, hint && hint[0] ? hint : "Halten zum Sprechen", sizeof(s_idle_hint_text));
-    if (s_scene == UI_STATUS_ICON_IDLE) {
-        copy_utf8_display(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
-        render_current_locked();
-    }
-    _lock_release(&s_lvgl_lock);
-}
-
+/*
+ * Der Bereitzustand sagt nichts mehr — er zeigt die Uhrzeit.
+ *
+ * Bis 08/2026 stand hier "Halten zum Sprechen" (oder "Tippen zum Sprechen",
+ * je nach Bedienart). Der Satz stammt aus der Zeit, als das Geraet in diesem
+ * Zustand nichts anderes anzuzeigen hatte. Am Handgelenk liest man ihn genau
+ * zweimal und danach nie wieder, und er kostete die Zeile, die jetzt die
+ * Ziffern tragen. Welche Taste spricht, beantwortet der erste Druck.
+ */
 void ui_status_set_idle(void)
 {
     ESP_LOGD(TAG, "idle");
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_idle_hint_text, UI_TEXT_HINT);
+    set_scene(UI_STATUS_ICON_IDLE, "Bereit", "", UI_TEXT_HINT);
 }
 
 /*
@@ -1094,40 +1238,88 @@ void ui_status_set_idle(void)
  * Ohne das bliebe die eigentliche Auskunft ("Aufgabe angelegt: Pool
  * rueckspuelen") unsichtbar: sie kam schon immer ueber die Funkstrecke, wurde
  * bei ready aber verworfen.
+ *
+ * `question` ist das, was die Bruecke verstanden hat. Sie steht als
+ * Ueberschrift ueber der Antwort — und zwar sofort, nicht erst im Verlauf:
+ * Wer eine falsch verstandene Frage gleich sieht, sagt sie noch einmal,
+ * statt sich spaeter ueber die Aufgabe zu wundern. Schickt die Bruecke keine,
+ * bleibt es beim alten "Bereit".
  */
-void ui_status_set_idle_text(const char *text)
+void ui_status_set_idle_text(const char *text, const char *question)
 {
     if (!text || !text[0]) {
         ui_status_set_idle();
         return;
     }
     ESP_LOGD(TAG, "idle mit Text");
+
     _lock_acquire(&s_lvgl_lock);
-    copy_utf8_display(s_last_answer, text, sizeof(s_last_answer));
+    ui_history_entry_t *entry = &s_history[s_history_next];
+    copy_utf8_display(entry->question, question ? question : "", sizeof(entry->question));
+    copy_utf8_display(entry->answer, text, sizeof(entry->answer));
+    s_history_next = (uint8_t)((s_history_next + 1) % UI_HISTORY_MAX);
+    if (s_history_count < UI_HISTORY_MAX) {
+        s_history_count++;
+    }
+    /* Ein neuer Turn beendet das Blaettern — der naechste Druck faengt vorn an. */
+    s_history_cursor = -1;
     _lock_release(&s_lvgl_lock);
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", text, UI_TEXT_MESSAGE);
+
+    set_scene(UI_STATUS_ICON_IDLE, (question && question[0]) ? question : "Bereit", text,
+              UI_TEXT_MESSAGE);
 }
 
 /*
- * Holt die zuletzt gezeigte Antwort zurueck auf den Bildschirm.
+ * Ein Schritt zurueck durch die letzten Fragen und Antworten.
  *
- * Der Fall dahinter: Das Display dimmt nach 30 Sekunden und schlaeft nach
- * fuenf Minuten ganz ein; wer den Stick erst danach ansieht, hat die Antwort
- * nie gelesen. Sie noch einmal zu zeigen kostet nichts — sie erneut zu
- * erfragen kostet Transkription, Intent und womoeglich eine zweite Aufgabe.
+ * Der Fall dahinter ist derselbe wie frueher bei der Seitentaste (die
+ * inzwischen die sprechende ist): Das Display
+ * dimmt nach 30 Sekunden und schlaeft nach fuenf Minuten ganz ein; wer den
+ * Stick erst danach ansieht, hat die Antwort nie gelesen. Sie noch einmal zu
+ * zeigen kostet nichts — sie erneut zu erfragen kostet Transkription, Intent
+ * und womoeglich eine zweite Aufgabe. Neu ist nur, dass es nicht bei der
+ * letzten aufhoert.
+ *
+ * Der Ring hat einen Ausgang und keinen Rundlauf: Nach der aeltesten Antwort
+ * steht wieder das Ziffernblatt da. Ein Zyklus ohne Ende wuesste nie, wann er
+ * fertig ist — so ist der Weg zurueck zur Uhr immer nur ein Druck mehr, und
+ * die Position in der Kopfzeile sagt, wie viele es noch sind.
  */
-void ui_status_show_last_answer(void)
+void ui_status_browse_history(void)
 {
-    _lock_acquire(&s_lvgl_lock);
-    const bool have = s_last_answer[0] != '\0';
-    _lock_release(&s_lvgl_lock);
+    char question[UI_QUESTION_MAX];
+    char answer[UI_HINT_TEXT_MAX];
+    char position[8];
 
-    if (!have) {
-        set_scene(UI_STATUS_ICON_IDLE, "Bereit", "Noch keine Antwort", UI_TEXT_HINT);
+    _lock_acquire(&s_lvgl_lock);
+    if (s_history_count == 0) {
+        _lock_release(&s_lvgl_lock);
+        set_scene(UI_STATUS_ICON_IDLE, "Verlauf", "Noch keine Antwort", UI_TEXT_HINT);
         return;
     }
-    ESP_LOGD(TAG, "letzte Antwort erneut");
-    set_scene(UI_STATUS_ICON_IDLE, "Bereit", s_last_answer, UI_TEXT_MESSAGE);
+    s_history_cursor++;
+    if (s_history_cursor >= (int8_t)s_history_count) {
+        s_history_cursor = -1;
+        _lock_release(&s_lvgl_lock);
+        ui_status_set_idle();
+        return;
+    }
+    /*
+     * `s_history_next` zeigt auf den naechsten freien Platz, die juengste
+     * Antwort liegt also davor. Das `+ UI_HISTORY_MAX` haelt den Ausdruck
+     * positiv, bevor der Rest gebildet wird — in C ist der Rest einer
+     * negativen Zahl negativ, und der Zugriff laege ausserhalb des Feldes.
+     */
+    const uint8_t index = (uint8_t)((s_history_next + UI_HISTORY_MAX - 1 - s_history_cursor) %
+                                    UI_HISTORY_MAX);
+    strlcpy(question, s_history[index].question, sizeof(question));
+    strlcpy(answer, s_history[index].answer, sizeof(answer));
+    snprintf(position, sizeof(position), "%d/%d", s_history_cursor + 1, s_history_count);
+    _lock_release(&s_lvgl_lock);
+
+    ESP_LOGD(TAG, "Verlauf %s", position);
+    set_scene_at(UI_STATUS_ICON_IDLE, question[0] ? question : "Verlauf", answer,
+                 UI_TEXT_MESSAGE, position);
 }
 
 /*
