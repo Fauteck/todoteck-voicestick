@@ -21,15 +21,15 @@
  *   Augenanker   46 % entlang V->B         Augenradius  0,25 * Strichstaerke
  *   Augenabstand +/- 0,29 * Strichstaerke  Pupille      0,12 * Strichstaerke
  *
- * Hier unten steht deshalb nur MARK_WIDTH; alles andere faellt daraus. Wer die
+ * Hier unten steht deshalb nur ICON_BOX; alles andere faellt daraus. Wer die
  * Figur groesser oder kleiner will, aendert genau diese eine Zahl.
  *
- * ── Warum 101,5 und nicht 112 ───────────────────────────────────────────────
+ * ── Warum die Figur schmaler ist als ihre Flaeche ───────────────────────────
  * Drei Szenen kippen die Figur um den Knick (Ruht +8, Hoert zu -7, Fehler +9).
  * Beim Drehen um einen Punkt, der nicht die Mitte ist, wandert der Rahmen mit.
- * 101,5 ist die groesste Breite, bei der alle sechs Posen in der 112er Flaeche
- * bleiben — nachgerechnet, nicht geschaetzt. Bei mehr ragt die Spitze in
- * "Fehler" rechts heraus.
+ * 90,625 Prozent der Flaeche ist die groesste Breite, bei der alle sechs Posen
+ * darin bleiben — nachgerechnet, nicht geschaetzt (hochkant: 101,5 von 112).
+ * Bei mehr ragt die Spitze in "Fehler" rechts heraus.
  *
  * ── Warum zwei Gruentoene ───────────────────────────────────────────────────
  * ui_status.c faerbt den Grund je Szene: cremeweiss (0xfff7ed), im Ruhezustand
@@ -49,11 +49,24 @@
  */
 
 /* ── Flaeche und Lage ─────────────────────────────────────────────────────── */
-#define ICON_BOX   112
-#define ICON_TOP_Y 42
+/*
+ * Im Querformat steht Tecki links, der Text rechts daneben — die 64 hier und
+ * TECKI_BOX in ui_status.c sind dieselbe Spalte und muessen zusammenpassen.
+ * Hochkant war die Flaeche 112 breit; auf 119 Pixeln Hoehe waere das die
+ * ganze Anzeige gewesen, und der Text haette nichts mehr uebrig gehabt.
+ */
+#define ICON_BOX    64
+#define ICON_LEFT_X 0
+#define ICON_TOP_Y  35
 
 /* ── Geometrie, alles abgeleitet ──────────────────────────────────────────── */
-#define MARK_WIDTH 101.5f
+/*
+ * 90,625 Prozent der Flaeche — frueher stand hier 101,5 zu 112, dieselbe
+ * Zahl. Als Verhaeltnis statt als Absolutwert, damit die Begruendung darunter
+ * auch bei einer anderen Flaeche noch stimmt: Wer die Figur groesser oder
+ * kleiner will, aendert ICON_BOX, und der Rand waechst mit.
+ */
+#define MARK_WIDTH (0.90625f * ICON_BOX)
 #define MARK_K     (MARK_WIDTH / 336.0f)
 #define STROKE_W   (76.0f * MARK_K)
 #define EYE_R      (0.25f * STROKE_W)
@@ -234,7 +247,7 @@ void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
     lv_obj_remove_style_all(icons->root);
     lv_obj_remove_flag(icons->root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(icons->root, ICON_BOX, ICON_BOX);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_MID, 0, ICON_TOP_Y);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, ICON_LEFT_X, ICON_TOP_Y);
 
     icons->body = make_stroke(icons->root);
     lv_obj_set_style_line_width(icons->body, (int32_t)lroundf(STROKE_W), 0);
@@ -350,7 +363,7 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
     }
 
     lv_obj_set_style_opa(icons->root, s->opa, 0);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_MID, 0, ICON_TOP_Y);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, ICON_LEFT_X, ICON_TOP_Y);
 }
 
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene)

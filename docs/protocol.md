@@ -173,6 +173,28 @@ Todoteck:
 The name survives a disconnect, so the header keeps saying which of two sticks
 is in your hand. Firmware that does not know the event ignores it.
 
+### Fork addition: `time`
+
+The Todoteck fork accepts a second control event, because the StickS3 has
+neither an RTC chip nor Wi-Fi and therefore no clock of its own:
+
+```json
+{"event":"time","epoch":1756400000,"tz_offset_min":120}
+```
+
+`epoch` is UTC seconds since 1970, `tz_offset_min` the offset of local time in
+minutes (120 for CEST). The firmware sets its system clock from it and renders
+`HH:MM` on the pairing, ready and resting screens — the device is worn on a
+wrist, and a watch that shows no time is a watch nobody looks at.
+
+Sending an offset instead of a timezone name keeps a timezone database out of
+the firmware. A host that never sends the event leaves the device without a
+clock; the screens then look exactly as they did before, so this event is
+optional like the others. Bridges send it right after connecting, which also
+handles DST changes and the drift of the module's oscillator — the system clock
+survives deep sleep but is not accurate over days, and the display therefore
+shows no seconds.
+
 `interaction_mode` controls the front-button behavior and idle screen hint.
 `hold_to_talk` starts audio on primary down and stops on primary up.
 `click_to_talk` starts audio on the first primary click and stops on the next

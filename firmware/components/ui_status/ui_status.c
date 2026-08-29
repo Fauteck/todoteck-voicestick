@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/lock.h>
+#include <time.h>
+#include <sys/time.h>
 #include <sys/param.h>
 #include <unistd.h>
 
@@ -27,10 +29,39 @@ static const char *TAG = "ui_status";
 
 #define LCD_HOST SPI2_HOST
 
-#define LCD_H_RES 135
-#define LCD_V_RES 240
-#define LCD_X_GAP 52
-#define LCD_Y_GAP 40
+/*
+ * Querformat: 240 breit, 135 hoch.
+ *
+ * Das Panel selbst ist hochkant (135x240); gedreht wird im Controller ueber
+ * das MV-Bit (esp_lcd_panel_swap_xy), nicht in LVGL — eine Software-Drehung
+ * kostete bei jedem Flush Rechenzeit fuer etwas, das der ST7789 umsonst kann.
+ *
+ * Der Grund fuer die Drehung ist der Text: Eine Antwort wie "Aufgabe
+ * angelegt: AliExpress Bestellung - Faellig: Di., 25.08.2026 - Projekt: Home
+ * Lab" braucht auf 119 nutzbaren Pixeln Breite sieben Zeilen, auf 224 noch
+ * drei. Dieselbe Antwort steht also in einer groesseren Schrift auf dem
+ * Schirm, und am Handgelenk liest sie sich in der Laengsrichtung des Arms
+ * ohnehin natuerlicher.
+ *
+ * Die Versaetze tauschen mit: Das sichtbare Fenster des Panels liegt hochkant
+ * bei (52,40), nach dem Achsentausch also bei (40,52).
+ */
+#define LCD_H_RES 240
+#define LCD_V_RES 135
+#define LCD_X_GAP 40
+#define LCD_Y_GAP 52
+
+/*
+ * Welche der beiden Querformat-Lagen.
+ *
+ * Der Achsentausch allein dreht das Bild um 90 Grad **und** spiegelt es; erst
+ * eine der beiden Spiegelachsen macht daraus eine echte Drehung. Welche der
+ * zwei moeglichen Lagen (um 180 Grad zueinander verdreht) die Tasten dorthin
+ * legt, wo man sie am Handgelenk haben will, entscheidet sich am Geraet und
+ * nicht hier. Steht das Bild nach dem ersten Flashen auf dem Kopf, ist diese
+ * 0 eine 1 — sonst nichts.
+ */
+#define LCD_LANDSCAPE_FLIP 0
 
 #define LCD_PIXEL_CLOCK_HZ (20 * 1000 * 1000)
 #define LCD_CMD_BITS 8
@@ -86,6 +117,7 @@ static lv_obj_t *s_top_label;
 static lv_obj_t *s_ble_dot;
 static lv_obj_t *s_status_label;
 static lv_obj_t *s_hint_label;
+static lv_obj_t *s_clock_label;
 static lv_obj_t *s_battery_shell;
 static lv_obj_t *s_battery_fill;
 static lv_obj_t *s_battery_tip;
@@ -103,6 +135,16 @@ static char s_hint_text[UI_HINT_TEXT_MAX] = "einen Moment";
 static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Halten zum Sprechen";
 static char s_device_name[24] = "BLE";
 static bool s_dimmed;
+/*
+ * Die Uhr steht erst, wenn die Bruecke sie einmal gestellt hat — vorher zeigt
+ * das Geraet lieber gar keine Zeit als eine falsche. `s_clock_offset_min` ist
+ * der Abstand zur UTC in Minuten, wie ihn die Bruecke meldet; damit braucht
+ * die Firmware keine Zeitzonendatenbank und keine Sommerzeitregel. Wechselt
+ * die Zeitzone oder die Sommerzeit, schickt die Bruecke den Wert beim
+ * naechsten Verbinden ohnehin neu.
+ */
+static bool s_clock_valid;
+static int32_t s_clock_offset_min;
 /*
  * Der Verbindungszustand kam bisher aus der Szene: "Koppeln" faerbte den
  * Punkt blau, alles andere gruen. Das log, sobald die Bruecke waehrend einer
@@ -205,11 +247,40 @@ static void create_battery_ui(lv_obj_t *screen)
     lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, 4);
 }
 
-#define METER_WIDTH 100
+/*
+ * Layoutmasse im Inhaltsbereich: 240x135 abzueglich 8 Pixel Rand ringsum.
+ *
+ * Im Querformat stehen Figur und Text **nebeneinander** statt uebereinander:
+ * Tecki links in einer festen Spalte, rechts daneben Statuszeile und Text.
+ * Hochkant war die Reihenfolge von oben nach unten die einzig moegliche; hier
+ * waere sie die schlechtere, weil 119 Pixel Hoehe fuer Figur *und* mehrere
+ * Textzeilen nicht reichen — die Figur allein braucht schon mehr als die
+ * Haelfte davon.
+ */
+#define CONTENT_W (LCD_H_RES - 16)
+#define CONTENT_H (LCD_V_RES - 16)
+
+/* Kopfzeile: Name und Verbindungspunkt links, Akku rechts. */
+#define HEADER_H 16
+
+/*
+ * Die Spalte fuer Tecki. Muss zu ICON_BOX in ui_status_icons.c passen — dort
+ * steht dieselbe Zahl, und sie ist dort die einzige, aus der die Figur
+ * faellt.
+ */
+#define TECKI_BOX 64
+#define COL_GAP 10
+/* Linke Kante und Breite der Textspalte neben der Figur. */
+#define COL_X (TECKI_BOX + COL_GAP)
+#define COL_W (CONTENT_W - COL_X)
+
+#define METER_WIDTH 130
 #define METER_LEVEL_HEIGHT 6
 #define METER_TIME_HEIGHT 3
-#define METER_LEVEL_Y 142
-#define METER_TIME_Y 152
+/* Unter der Statuszeile in der Textspalte, nicht mittig ueber den Schirm. */
+#define METER_X (COL_X + (COL_W - METER_WIDTH) / 2)
+#define METER_LEVEL_Y 74
+#define METER_TIME_Y 86
 
 /*
  * Zwei Balken, die nur waehrend der Aufnahme sichtbar sind.
@@ -228,7 +299,7 @@ static void create_meters(lv_obj_t *screen)
     lv_obj_set_style_radius(s_meter_track, METER_LEVEL_HEIGHT / 2, 0);
     lv_obj_set_style_bg_opa(s_meter_track, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(s_meter_track, lv_color_hex(0x9a8fa4), 0);
-    lv_obj_align(s_meter_track, LV_ALIGN_TOP_MID, 0, METER_LEVEL_Y);
+    lv_obj_align(s_meter_track, LV_ALIGN_TOP_LEFT, METER_X, METER_LEVEL_Y);
     lv_obj_add_flag(s_meter_track, LV_OBJ_FLAG_HIDDEN);
 
     s_meter_fill = lv_obj_create(s_meter_track);
@@ -245,7 +316,7 @@ static void create_meters(lv_obj_t *screen)
     lv_obj_set_style_radius(s_time_track, METER_TIME_HEIGHT / 2, 0);
     lv_obj_set_style_bg_opa(s_time_track, LV_OPA_20, 0);
     lv_obj_set_style_bg_color(s_time_track, lv_color_hex(0x9a8fa4), 0);
-    lv_obj_align(s_time_track, LV_ALIGN_TOP_MID, 0, METER_TIME_Y);
+    lv_obj_align(s_time_track, LV_ALIGN_TOP_LEFT, METER_X, METER_TIME_Y);
     lv_obj_add_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
 
     s_time_fill = lv_obj_create(s_time_track);
@@ -258,21 +329,35 @@ static void create_meters(lv_obj_t *screen)
 }
 
 /*
- * Layoutmasse im Inhaltsbereich: 135x240 abzueglich 8 Pixel Rand ringsum.
+ * Unterkante des Texts. Eine fuer beide Faelle: Ob er neben Tecki in der
+ * Spalte steht oder ohne ihn ueber die ganze Breite, aendert die Breite —
+ * nach unten hat er in beiden Faellen bis zum Rand Platz.
  */
-#define CONTENT_W (LCD_H_RES - 16)
-#define CONTENT_H (LCD_V_RES - 16)
+#define TEXT_BOTTOM_Y (CONTENT_H - 2)
+#define STATUS_Y_WITH_TECKI (HEADER_H + 6)
+#define STATUS_Y_TEXT_ONLY (HEADER_H + 2)
+#define TEXT_GAP 4
+
 /*
- * Zwei Untergrenzen fuer den Text, weil er zwei Arten haengt: unter Tecki
- * haengt er am unteren Rand (Ausrichtung BOTTOM_MID mit -10), ohne Tecki
- * steht er oben und darf bis fast nach unten laufen. Wer die 10 hier aendert,
- * muss den Versatz beim Ausrichten mitaendern.
+ * Die Uhr — der Grund, warum das Geraet auch am Handgelenk etwas taugt, wenn
+ * gerade niemand spricht.
+ *
+ * Sie erscheint in den drei Zustaenden ohne Auskunft (Koppeln, Bereit,
+ * Ruht) und nur dann, wenn die Bruecke die Zeit schon einmal geschickt hat:
+ * Der StickS3 hat keinen RTC-Baustein und kein WLAN, seine einzige Zeitquelle
+ * ist das `time`-Steuerereignis (docs/protocol.md). Ohne das waere jede
+ * angezeigte Uhrzeit geraten.
+ *
+ * Gesetzt in Montserrat statt in den Todoteck-Schriften: "07:42" ist reines
+ * ASCII, der Latin-1-Grund fuer die eigenen Schriften trifft hier also nicht
+ * zu — und die eingebaute Schrift gibt es in Groessen, die wir nicht selbst
+ * erzeugen muessen.
  */
-#define TEXT_BOTTOM_Y (CONTENT_H - 10)
-#define TEXT_ONLY_BOTTOM_Y (CONTENT_H - 4)
-#define STATUS_Y_WITH_TECKI 168
-#define STATUS_Y_TEXT_ONLY 18
-#define TEXT_GAP 6
+#define CLOCK_STATUS_Y (HEADER_H + 4)
+#define CLOCK_Y (HEADER_H + 28)
+#define CLOCK_HINT_Y (CONTENT_H - 22)
+/* Wie oft die Anzeige nachzieht. Sekunden zeigt sie nicht, Minuten genuegen. */
+#define CLOCK_TICK_MS 10000
 
 /*
  * Die Schriftleiter fuer den unteren Text, von gross nach klein.
@@ -315,21 +400,23 @@ typedef struct {
     const lv_font_t *font;  /* Schrift des unteren Texts */
     int32_t line_space;     /* Zeilenabstand dazu */
     int32_t status_y;       /* Oberkante der Statuszeile */
+    int32_t x;              /* linke Kante von Statuszeile und Text */
+    int32_t width;          /* Breite beider */
 } text_layout_t;
 
-static int32_t text_height(const char *text, const text_step_t *step)
+static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
 {
     lv_point_t size;
-    lv_text_get_size(&size, text ? text : "", step->font, 0, step->line_space, CONTENT_W,
+    lv_text_get_size(&size, text ? text : "", step->font, 0, step->line_space, width,
                      LV_TEXT_FLAG_NONE);
     return size.y;
 }
 
 /* Die groesste Stufe, auf der der Text noch in `room` passt — sonst NULL. */
-static const text_step_t *largest_step_fitting(const char *text, int32_t room)
+static const text_step_t *largest_step_fitting(const char *text, int32_t room, int32_t width)
 {
     for (size_t i = 0; i < TEXT_STEP_COUNT; i++) {
-        if (text_height(text, &TEXT_STEPS[i]) <= room) {
+        if (text_height(text, &TEXT_STEPS[i], width) <= room) {
             return &TEXT_STEPS[i];
         }
     }
@@ -342,43 +429,76 @@ static const text_step_t *largest_step_fitting(const char *text, int32_t room)
  *
  * Der Anlass steht auf einem Foto vom Handgelenk: "Aufgabe angelegt:
  * AliExpress Bestellung · Faellig: Di., 25.08.2026 · Projekt: Home Lab"
- * braucht auf 119 Pixel Breite sieben Zeilen. Die wuchsen vom unteren Rand
- * nach oben ueber die Statuszeile und mitten durch die Figur hindurch —
- * lesbar war danach weder das eine noch das andere.
+ * wuchs vom unteren Rand nach oben ueber die Statuszeile und mitten durch die
+ * Figur hindurch — lesbar war danach weder das eine noch das andere.
  *
  * Die Entscheidung faellt deshalb am gemessenen Text, nicht an der Szene:
- * Passt er unter Tecki, bleibt alles wie gehabt. Passt er nicht, weicht
- * Tecki. Er sagt ohnehin dasselbe wie die Statuszeile daneben; der Text sagt
- * etwas, das es nur einmal gibt. Und in beiden Faellen bekommt der Text die
- * groesste Schrift, die der freie Platz noch traegt.
+ * Passt er in die Spalte neben Tecki, bleibt die Figur stehen. Passt er
+ * nicht, weicht sie und der Text bekommt die ganze Breite. Sie sagt ohnehin
+ * dasselbe wie die Statuszeile daneben; der Text sagt etwas, das es nur
+ * einmal gibt. Und in beiden Faellen bekommt der Text die groesste Schrift,
+ * die der freie Platz noch traegt.
+ *
+ * Im Querformat faellt die Entscheidung seltener gegen Tecki als hochkant:
+ * Die Spalte ist mit 150 Pixeln breiter als frueher der ganze Schirm.
  */
 static text_layout_t plan_text_layout(const char *status, const char *text, ui_text_kind_t kind)
 {
     const int32_t status_h = status && status[0] ? todoteck_font_16.line_height : 0;
-    const int32_t room_under_tecki = TEXT_BOTTOM_Y - (STATUS_Y_WITH_TECKI + status_h);
+    const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
+    const int32_t room_beside_tecki = TEXT_BOTTOM_Y - top_beside;
 
     if (kind == UI_TEXT_MESSAGE) {
-        const text_step_t *step = largest_step_fitting(text, room_under_tecki);
+        const text_step_t *step = largest_step_fitting(text, room_beside_tecki, COL_W);
         if (step) {
-            return (text_layout_t){ true, step->font, step->line_space, STATUS_Y_WITH_TECKI };
+            return (text_layout_t){ true, step->font, step->line_space, STATUS_Y_WITH_TECKI,
+                                    COL_X, COL_W };
         }
-    } else if (text_height(text, &TEXT_STEP_SMALLEST) <= room_under_tecki) {
+    } else if (text_height(text, &TEXT_STEP_SMALLEST, COL_W) <= room_beside_tecki) {
         /* Beiwerk bleibt klein und gedaempft, auch wenn Platz waere. */
         return (text_layout_t){ true, TEXT_STEP_SMALLEST.font, TEXT_STEP_SMALLEST.line_space,
-                                STATUS_Y_WITH_TECKI };
+                                STATUS_Y_WITH_TECKI, COL_X, COL_W };
     }
 
     /*
      * Ohne Figur: Statuszeile nach oben unter die Kopfzeile, der Rest gehoert
-     * dem Text. Die Zeile wird immer eingerechnet, auch wenn sie gerade leer
-     * ist — sonst spraenge das Layout, sobald sie doch etwas traegt.
+     * dem Text ueber die volle Breite. Die Zeile wird immer eingerechnet, auch
+     * wenn sie gerade leer ist — sonst spraenge das Layout, sobald sie doch
+     * etwas traegt.
      */
     const int32_t top = STATUS_Y_TEXT_ONLY + todoteck_font_16.line_height + TEXT_GAP;
-    const text_step_t *step = largest_step_fitting(text, TEXT_ONLY_BOTTOM_Y - top);
+    const text_step_t *step = largest_step_fitting(text, TEXT_BOTTOM_Y - top, CONTENT_W);
     if (!step) {
         step = &TEXT_STEP_SMALLEST;
     }
-    return (text_layout_t){ false, step->font, step->line_space, STATUS_Y_TEXT_ONLY };
+    return (text_layout_t){ false, step->font, step->line_space, STATUS_Y_TEXT_ONLY,
+                            0, CONTENT_W };
+}
+
+/*
+ * Zeigt diese Szene die Uhr?
+ *
+ * Nur dort, wo nichts Wichtigeres steht: Koppeln, Bereit und Ruht, und auch
+ * dort nur, solange der untere Text Beiwerk ist ("Halten zum Sprechen").
+ * Sobald eine Auskunft anliegt, gehoert der Platz ihr — eine Antwort liest
+ * man einmal, die Uhrzeit steht beim naechsten Blick wieder da.
+ */
+static bool clock_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
+{
+    if (!s_clock_valid || kind != UI_TEXT_HINT) {
+        return false;
+    }
+    return scene == UI_STATUS_ICON_IDLE || scene == UI_STATUS_ICON_PAIRING ||
+           scene == UI_STATUS_ICON_RESTING;
+}
+
+/* "07:42" aus der Systemzeit plus gemeldetem Abstand zur UTC. */
+static void format_clock(char *out, size_t size)
+{
+    const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&now, &parts);
+    snprintf(out, size, "%02d:%02d", parts.tm_hour, parts.tm_min);
 }
 
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
@@ -402,18 +522,41 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         status_shown = "Fehler";
     }
 
+    const bool with_clock = clock_scene(scene, s_text_kind);
+
     ui_status_icons_show(&s_icons, plan.tecki);
     lv_label_set_text(s_status_label, status_shown);
-    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, plan.status_y);
+    lv_obj_set_width(s_status_label, plan.width);
+    lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, plan.x,
+                 with_clock ? CLOCK_STATUS_Y : plan.status_y);
+
+    if (with_clock) {
+        char clock_text[8];
+        format_clock(clock_text, sizeof(clock_text));
+        lv_label_set_text(s_clock_label, clock_text);
+        lv_obj_set_width(s_clock_label, plan.width);
+        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, plan.x, CLOCK_Y);
+        lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+    }
 
     lv_label_set_text(s_hint_label, body_text);
     lv_obj_set_style_text_font(s_hint_label, plan.font, 0);
     lv_obj_set_style_text_line_space(s_hint_label, plan.line_space, 0);
-    if (plan.tecki) {
+    lv_obj_set_width(s_hint_label, plan.width);
+    if (with_clock) {
+        /* Unter der Uhr, klein: der Hinweis ist hier das Beiwerk zum Zifferblatt. */
+        lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
+        lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, CLOCK_HINT_Y);
+    } else if (plan.tecki) {
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+        lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x,
+                     plan.status_y + todoteck_font_16.line_height + TEXT_GAP);
     } else {
         /*
          * Feste Hoehe mit LV_LABEL_LONG_DOT: Was selbst in der kleinen
@@ -421,10 +564,10 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
         const int32_t top = plan.status_y + todoteck_font_16.line_height + TEXT_GAP;
-        lv_obj_set_height(s_hint_label, TEXT_ONLY_BOTTOM_Y - top);
+        lv_obj_set_height(s_hint_label, TEXT_BOTTOM_Y - top);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
-        lv_obj_align(s_hint_label, LV_ALIGN_TOP_MID, 0, top);
+        lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
     }
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
@@ -460,6 +603,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, text, 0);
+    lv_obj_set_style_text_color(s_clock_label, text, 0);
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     lv_obj_set_style_text_color(s_battery_label, muted, 0);
     lv_obj_set_style_border_color(s_battery_shell, muted, 0);
@@ -477,6 +621,28 @@ static void render_current_locked(void)
         s_text_kind = kind;
     } else {
         render_scene_locked(s_scene, s_status_text, s_hint_text);
+    }
+}
+
+/*
+ * Nachziehen der Minute.
+ *
+ * Neu gezeichnet wird nur, wenn sich die Ziffern wirklich geaendert haben:
+ * `lv_label_set_text` wuerde sonst alle zehn Sekunden eine Flaeche als
+ * ungueltig melden, die genauso aussieht wie vorher — auf einem Geraet, das
+ * seinen Akku in Stunden misst, ist das kein Detail.
+ */
+static void clock_tick_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_ready || !s_clock_valid || !s_clock_label ||
+        lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+    char now[8];
+    format_clock(now, sizeof(now));
+    if (strcmp(now, lv_label_get_text(s_clock_label)) != 0) {
+        lv_label_set_text(s_clock_label, now);
     }
 }
 
@@ -506,18 +672,34 @@ static void create_status_ui(void)
     lv_label_set_text(s_status_label, s_status_text);
     lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
-    lv_obj_set_width(s_status_label, LCD_H_RES - 16);
+    lv_obj_set_width(s_status_label, COL_W);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, 168);
+    lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, COL_X, STATUS_Y_WITH_TECKI);
+
+    s_clock_label = lv_label_create(s_screen);
+    lv_label_set_text(s_clock_label, "--:--");
+    lv_obj_set_style_text_font(s_clock_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_clock_label, lv_color_hex(0x3f3440), 0);
+    lv_obj_set_width(s_clock_label, COL_W);
+    lv_obj_set_style_text_align(s_clock_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, COL_X, CLOCK_Y);
+    lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(s_hint_label, TEXT_STEP_SMALLEST.line_space, 0);
-    lv_obj_set_width(s_hint_label, LCD_H_RES - 16);
+    lv_obj_set_width(s_hint_label, COL_W);
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x7f7180), 0);
     lv_label_set_text(s_hint_label, s_hint_text);
-    lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, COL_X, CLOCK_HINT_Y);
+
+    /*
+     * Die Uhr zieht von selbst nach. Der Takt laeuft im LVGL-Zeitgeber und
+     * damit im selben Strang wie alles andere an der Anzeige — er braucht die
+     * Sperre also nicht selbst zu nehmen.
+     */
+    lv_timer_create(clock_tick_cb, CLOCK_TICK_MS, NULL);
 
     s_ready = true;
     render_current_locked();
@@ -739,7 +921,9 @@ esp_err_t ui_status_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "reset panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "init panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, true), TAG, "invert panel colors");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "mirror panel");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, true), TAG, "swap panel axes");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, LCD_LANDSCAPE_FLIP, !LCD_LANDSCAPE_FLIP),
+                        TAG, "mirror panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(panel, LCD_X_GAP, LCD_Y_GAP), TAG, "set panel gap");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "turn display on");
 
@@ -923,6 +1107,46 @@ void ui_status_set_press_too_short(void)
  * Der echte Verbindungszustand zur Bruecke. Faerbt nur den Punkt in der
  * Kopfzeile — die Szene bleibt, wie sie ist.
  */
+/*
+ * Die Zeit kommt von der Bruecke, weil das Geraet keine eigene hat.
+ *
+ * `epoch_utc` ist die uebliche Sekundenzaehlung seit 1970 in UTC,
+ * `tz_offset_min` der Abstand der Ortszeit dazu in Minuten (also 120 fuer
+ * MESZ). Gestellt wird die Systemuhr; die laeuft im Tiefschlaf weiter, die
+ * Uhrzeit ueberlebt also das Aufwachen. Genau nimmt sie es dabei nicht — der
+ * Modul-Oszillator driftet, deshalb schickt die Bruecke die Zeit bei jedem
+ * Verbinden neu und die Anzeige zeigt bewusst keine Sekunden.
+ */
+void ui_status_set_clock(int64_t epoch_utc, int32_t tz_offset_min)
+{
+    if (epoch_utc <= 0) {
+        return;
+    }
+    const struct timeval now = { .tv_sec = (time_t)epoch_utc, .tv_usec = 0 };
+    settimeofday(&now, NULL);
+
+    _lock_acquire(&s_lvgl_lock);
+    s_clock_offset_min = tz_offset_min;
+    s_clock_valid = true;
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+}
+
+/*
+ * Nach dem Aufwachen aus dem Tiefschlaf: Die Systemuhr laeuft weiter, der
+ * Abstand zur UTC lag aber im normalen RAM und ist weg. Er kommt aus dem
+ * RTC-Speicher zurueck (main.c), und erst damit darf wieder eine Uhrzeit auf
+ * dem Schirm stehen.
+ */
+void ui_status_restore_clock(int32_t tz_offset_min)
+{
+    _lock_acquire(&s_lvgl_lock);
+    s_clock_offset_min = tz_offset_min;
+    s_clock_valid = true;
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+}
+
 void ui_status_set_link(bool connected)
 {
     _lock_acquire(&s_lvgl_lock);

@@ -37,7 +37,10 @@ upstream code and untouched by this fork — see
 | A second press of the **front** button aborts the running recording as well | In hold-to-talk a second press cannot start a turn — the button would have had to come up first, and then no recording would be running. So it is either a lost release or an explicit "stop this", and both end the same way. The way out sits on the button already under the thumb instead of the one on the edge |
 | Hold really means hold: a press shorter than 500 ms is discarded on the device, screen shows `Zu kurz` | A tap started a recording exactly like a hold, so whoever started speaking afterwards spoke into a recording that had already ended. The bridge dropped those takes silently (`MIN_TURN_MILLIS`); the device now says so instead |
 | The recording never outlives the press: every 200 ms tick compares the GPIO against the recording state | The release arrives from an ISR callback through a twelve-slot queue. If it is lost, the take used to run to the 30 s limit with nobody speaking. The tick replays the missing event; two consecutive ticks are required so a single misread cannot cut a sentence |
-| Long text pushes Tecki off the screen instead of running through him | An answer like "Aufgabe angelegt: AliExpress Bestellung · Fällig: Di., 25.08.2026 · Projekt: Home Lab" needs seven lines on 119 px. They used to grow upwards from the bottom edge across the status line and straight through the figure. The decision is made on the measured text, not on the scene: if it fits below Tecki nothing changes, if it does not, Tecki steps aside and the text gets the whole screen in the largest font that fits |
+| Long text pushes Tecki off the screen instead of running through him | An answer like "Aufgabe angelegt: AliExpress Bestellung · Fällig: Di., 25.08.2026 · Projekt: Home Lab" used to grow upwards from the bottom edge across the status line and straight through the figure. The decision is made on the measured text, not on the scene: if it fits into the column beside Tecki nothing changes, if it does not, Tecki steps aside and the text gets the whole width in the largest font that fits |
+| Landscape instead of portrait: the panel is rotated in the controller (`swap_xy`), Tecki moves into a 64 px column on the left, status line and text into a 150 px column beside him | The same answer needs seven lines on 119 px of width and three on 224 — it therefore lands one or two font steps larger. On a wrist, text along the arm also reads more naturally. The rotation is free: the ST7789 does it in hardware, an LVGL rotation would cost CPU on every flush |
+| A clock on the pairing, ready and resting screens (`time` control event, Montserrat 28) | The stick is worn on a wrist. Between two sentences it showed a mascot and a hint — a watch face costs nothing there and answers the question a wrist device is asked most often. It stays absent until a bridge has sent the time: the board has no RTC and no Wi-Fi, and a guessed time is worse than none |
+| Raising the wrist wakes the dimmed screen (BMI270, polled at 10 Hz while dimmed) | The screen dims after 30 s. Getting the time back meant pressing the side button — with the other hand, which is the movement a watch exists to avoid. The gesture is movement, then stillness, then a tilt of at least 20° against the pose before it; all three, because otherwise every step while walking wakes the screen. Deep sleep still needs the button: M5 documents the IMU interrupt as `G4 (PYG4_IMU_INT via M5PM1)`, and whether that reaches a wake-capable pin is a measurement nobody has taken |
 | The answer is set in the largest of six sizes (<!-- doku-vertrag:schriftstufen -->10, 11, 12, 13, 14, 16 px<!-- /doku-vertrag -->) that still fits the free area, each with its own line spacing | With only 10 px and 16 px to choose from, anything longer than a line landed in the smallest one — a two-sentence answer filled two thirds of the screen and left the rest white while being barely readable. The steps in between turn that white space into type size |
 | Characters the fonts lack are substituted or dropped, not drawn as boxes | Bridge answers carry emoji (check mark, calendar, folder) and typographic punctuation. The emoji showed as empty rectangles mid-sentence and are removed together with the gap around them; dashes, curly quotes and ellipses are replaced with their ASCII equivalents, because dropping them would turn "Aufgabe – heute" into "Aufgabe heute" |
 | Side button while idle shows the last answer again | The screen dims after 30 s and sleeps after 5 minutes; whoever looks later never read the answer |
@@ -139,9 +142,10 @@ while the capture path is up. That is why the start tone is played *before*
 - Board: M5Stack StickS3 / ESP32-S3-PICO-1-N8R8
 - Front button: GPIO11, protocol `primary`, push-to-talk, abort on a second press, and deep-sleep wake
 - Side button: GPIO12, protocol `secondary`, abort, cancel, or recall the last answer
+- IMU: BMI270 on the shared I2C bus (0x68), used for the wrist-raise gesture; its interrupt line (documented as G4) is unverified and unused
 - PMIC IRQ: GPIO13
 - Audio codec: ES8311 over I2S, 16 kHz / 16 bit / mono, speaker on the same lines
-- Display: 135 x 240 ST7789P3 portrait screen
+- Display: 135 x 240 ST7789P3 panel, driven in landscape (240 x 135) via the controller's axis swap
 - LCD backlight: GPIO38 PWM
 
 Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s3_board.h`.
@@ -263,6 +267,7 @@ idf.py -p /dev/cu.usbmodemXXXX erase-flash flash monitor
 Firmware dependencies are declared through the ESP-IDF component manager:
 
 <!-- doku-vertrag:firmware-abhaengigkeiten -->
+- `espressif/bmi270`
 - `espressif/button`
 - `espressif/esp_codec_dev`
 - `78/esp-opus`
