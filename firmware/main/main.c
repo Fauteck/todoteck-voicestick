@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -483,6 +484,17 @@ static uint32_t start_recording(void)
      */
     play_tone(AUDIO_TONE_START);
 
+    /*
+     * Sensor still, solange aufgenommen wird.
+     *
+     * Der BMI270 haengt am selben I2C-Bus wie der ES8311, und der wird beim
+     * Start des Aufnahmepfads Register fuer Register konfiguriert. Eine
+     * Abfrage mitten hinein ist die eine Stelle, an der sich Geste und
+     * Mikrofon ins Gehege kommen koennen — und waehrend jemand die Taste
+     * haelt, gibt es ohnehin nichts aufzuwecken.
+     */
+    wrist_wake_watch(false);
+
     esp_err_t err = acquire_recording_pm_locks();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "acquire recording pm locks failed: %s", esp_err_to_name(err));
@@ -494,7 +506,17 @@ static uint32_t start_recording(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio start failed: %s", esp_err_to_name(err));
         release_recording_pm_locks();
-        ui_status_set_error("Aufnahme startet nicht");
+        /*
+         * Der Grund gehoert auf den Schirm, nicht nur ins Log: An diesem
+         * Geraet haengt kein Kabel, wenn es nicht geht. "Aufnahme startet
+         * nicht" allein sagt nur, dass etwas kaputt ist — der Fehlercode
+         * sagt, was: ESP_ERR_NO_MEM ist ein Speicherproblem,
+         * ESP_ERR_INVALID_STATE eine haengende Vorgaenger-Sitzung,
+         * ESP_ERR_NOT_FOUND ein Codec, der nicht antwortet.
+         */
+        char meldung[64];
+        snprintf(meldung, sizeof(meldung), "Aufnahme startet nicht: %s", esp_err_to_name(err));
+        ui_status_set_error(meldung);
         return 0;
     }
 
