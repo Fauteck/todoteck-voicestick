@@ -453,7 +453,14 @@ static void create_meters(lv_obj_t *screen)
  * sind darin 47 Pixel hoch statt 35 wie bisher in Montserrat 48.
  */
 #define CLOCK_FACE_TECKI_Y (CONTENT_H - UI_TECKI_BOX_SMALL)
-#define CLOCK_FACE_Y (HEADER_H + 14)
+/*
+ * Mittig zwischen Kopfzeile und Unterkante: (103 - 47) / 2 = 28 unter der
+ * Kopfzeile. Die Ziffern enden damit genau dort, wo Tecki anfaengt — was
+ * nichts ausmacht, weil er in der linken Ecke sitzt und die Uhrzeit
+ * waagerecht mittig steht: Selbst die breiteste faengt erst bei Pixel 17 an,
+ * die uebliche ("19:11") bei 46.
+ */
+#define CLOCK_FACE_Y (HEADER_H + 28)
 /* Wie oft die Anzeige nachzieht. Sekunden zeigt sie nicht, Minuten genuegen. */
 #define CLOCK_TICK_MS 10000
 
