@@ -46,7 +46,7 @@ static const char *TAG = "voice_stick";
 #define RECORDING_TICK_MS 200
 #define RECORDING_TICK_US (RECORDING_TICK_MS * 1000ULL)
 /*
- * Wie lange die vordere Taste mindestens gehalten werden muss, damit die
+ * Wie lange die Sprechtaste mindestens gehalten werden muss, damit die
  * Aufnahme zaehlt. Derselbe Wert wie MIN_TURN_MILLIS in der Bruecke
  * (VoiceBridgeService.kt): Kuerzeres wirft die ohnehin weg, dann soll das
  * Geraet es gleich selbst tun — und es sagen, statt stumm nichts zu liefern.
@@ -96,8 +96,8 @@ static int64_t s_primary_release_us;
 static char s_display_name[24];
 static uint32_t s_session_id = 1;
 static QueueHandle_t s_app_event_queue;
-static button_handle_t s_front_button;
-static button_handle_t s_side_button;
+static button_handle_t s_talk_button;
+static button_handle_t s_browse_button;
 static int64_t s_primary_down_us;
 static int64_t s_secondary_down_us;
 static uint32_t s_primary_session_id;
@@ -150,11 +150,16 @@ static const char *app_ui_state_name(app_ui_state_t state)
     return "unknown";
 }
 
+/*
+ * Die Tasten heissen nach ihrer Rolle, nicht nach ihrer Lage: `TALK` ist die
+ * Sprechtaste, `BROWSE` die zum Blaettern. Welcher Pin daran haengt, steht in
+ * stick_s3_board.h -- und hat 08/2026 gewechselt.
+ */
 typedef enum {
-    APP_EVENT_FRONT_DOWN,
-    APP_EVENT_FRONT_UP,
-    APP_EVENT_SIDE_DOWN,
-    APP_EVENT_SIDE_UP,
+    APP_EVENT_TALK_DOWN,
+    APP_EVENT_TALK_UP,
+    APP_EVENT_BROWSE_DOWN,
+    APP_EVENT_BROWSE_UP,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
@@ -187,6 +192,16 @@ typedef struct {
      * 96 waeren deutsche Antworten regelmaessig mitten im Wort geendet.
      */
     char text[192];
+    /*
+     * Nur bei `ready`: das, was die Bruecke verstanden hat -- die Frage zur
+     * Antwort daneben. Sie steht im selben Steuerbefehl, damit Frage und
+     * Antwort nicht in zwei Schreibvorgaengen auseinanderlaufen koennen.
+     *
+     * 64 Byte, nicht 192: Im Verlauf ist sie die Ueberschrift, nicht der
+     * Inhalt -- und jedes Byte hier kostet zwoelffach, so viele Plaetze hat
+     * die Warteschlange.
+     */
+    char question[64];
 } app_event_t;
 
 static void update_battery_status(void);
@@ -215,7 +230,8 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
     dst[len] = '\0';
 }
 
-static void queue_ui_state_event(const char *state, const char *text);
+static void queue_ui_state_event(const char *state, const char *text,
+                                 const char *question);
 static void queue_device_name_event(const char *name);
 static void queue_time_event(int64_t epoch, int32_t tz_offset_min);
 static void apply_interaction_mode(interaction_mode_t mode);
@@ -349,6 +365,17 @@ static void stop_host_response_timer(void)
     }
 }
 
+/* Liegt eine der Weck-Tasten gerade unten? Aktiv ist low. */
+static bool any_wake_gpio_low(const gpio_num_t *gpios, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (gpio_get_level(gpios[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void enter_deep_sleep(void)
 {
     if (s_recording || s_ota_updating || voice_ble_ota_is_active()) {
@@ -377,21 +404,36 @@ static void enter_deep_sleep(void)
         return;
     }
 
-    const gpio_num_t wake_gpio = STICK_S3_PIN_BUTTON_FRONT;
-    if (!esp_sleep_is_valid_wakeup_gpio(wake_gpio)) {
-        ESP_LOGE(TAG, "GPIO%d cannot wake from deep sleep", wake_gpio);
-        restart_deep_sleep_timer();
-        return;
+    /*
+     * Beide Tasten wecken, nicht nur die sprechende.
+     *
+     * Bis 08/2026 weckte allein die vordere -- damals war sie die
+     * Sprechtaste, und "druecken, um zu reden" war zugleich das Aufwachen.
+     * Seit die Rollen getauscht sind, waere eine der beiden im Tiefschlaf
+     * tot: Wer nach fuenf Minuten den Verlauf durchblaettern will, drueckt
+     * eine Taste, die nichts tut, und haelt das Geraet fuer defekt. ext1
+     * nimmt ohnehin eine Maske, zwei Pins kosten also nichts.
+     */
+    const uint64_t wake_mask = (1ULL << STICK_S3_PIN_BUTTON_TALK) |
+                               (1ULL << STICK_S3_PIN_BUTTON_BROWSE);
+    const gpio_num_t wake_gpios[] = { STICK_S3_PIN_BUTTON_TALK, STICK_S3_PIN_BUTTON_BROWSE };
+    const size_t wake_gpio_count = sizeof(wake_gpios) / sizeof(wake_gpios[0]);
+
+    for (size_t i = 0; i < wake_gpio_count; i++) {
+        if (!esp_sleep_is_valid_wakeup_gpio(wake_gpios[i])) {
+            ESP_LOGE(TAG, "GPIO%d cannot wake from deep sleep", wake_gpios[i]);
+            restart_deep_sleep_timer();
+            return;
+        }
+        if (gpio_get_level(wake_gpios[i]) == 0) {
+            ESP_LOGI(TAG, "skip deep sleep: GPIO%d is pressed", wake_gpios[i]);
+            restart_deep_sleep_timer();
+            return;
+        }
     }
 
-    if (gpio_get_level(wake_gpio) == 0) {
-        ESP_LOGI(TAG, "skip deep sleep: front button is pressed");
-        restart_deep_sleep_timer();
-        return;
-    }
-
-    ESP_LOGI(TAG, "entering deep sleep, wake on front button GPIO%d low (level=%d)",
-             wake_gpio, gpio_get_level(wake_gpio));
+    ESP_LOGI(TAG, "entering deep sleep, wake on GPIO%d/GPIO%d low",
+             wake_gpios[0], wake_gpios[1]);
     release_recording_pm_locks();
     ESP_ERROR_CHECK_WITHOUT_ABORT(ui_status_set_brightness(0));
     /* Erst hier, nicht oben: Wird der Schlaf doch abgesagt (Aufnahme, OTA,
@@ -410,11 +452,12 @@ static void enter_deep_sleep(void)
        remains effective in deep sleep; combined with the explicit RTC pull-up
        below this prevents GPIO%d from floating low and self-waking. */
     (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    (void)rtc_gpio_pulldown_dis(wake_gpio);
-    (void)rtc_gpio_pullup_en(wake_gpio);
+    for (size_t i = 0; i < wake_gpio_count; i++) {
+        (void)rtc_gpio_pulldown_dis(wake_gpios[i]);
+        (void)rtc_gpio_pullup_en(wake_gpios[i]);
+    }
 
-    esp_err_t err = esp_sleep_enable_ext1_wakeup_io(1ULL << wake_gpio,
-                                                    ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_err_t err = esp_sleep_enable_ext1_wakeup_io(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "enable deep sleep wake failed: %s", esp_err_to_name(err));
         restart_deep_sleep_timer();
@@ -425,18 +468,17 @@ static void enter_deep_sleep(void)
        capacitance, etc.). If it stays low we would just wake up immediately
        after esp_deep_sleep_start(), so abort and retry later. */
     int wait_ms = 0;
-    while (gpio_get_level(wake_gpio) == 0 && wait_ms < 200) {
+    while (any_wake_gpio_low(wake_gpios, wake_gpio_count) && wait_ms < 200) {
         vTaskDelay(pdMS_TO_TICKS(10));
         wait_ms += 10;
     }
-    if (gpio_get_level(wake_gpio) == 0) {
-        ESP_LOGW(TAG, "front button still low after %d ms, abort deep sleep", wait_ms);
+    if (any_wake_gpio_low(wake_gpios, wake_gpio_count)) {
+        ESP_LOGW(TAG, "wake pin still low after %d ms, abort deep sleep", wait_ms);
         restart_deep_sleep_timer();
         return;
     }
 
-    ESP_LOGI(TAG, "deep sleep go (wait_ms=%d level=%d)", wait_ms,
-             gpio_get_level(wake_gpio));
+    ESP_LOGI(TAG, "deep sleep go (wait_ms=%d)", wait_ms);
     esp_deep_sleep_start();
 }
 
@@ -625,7 +667,7 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
     }
 }
 
-static void queue_ui_state_event(const char *state, const char *text)
+static void queue_ui_state_event(const char *state, const char *text, const char *question)
 {
     if (!s_app_event_queue) {
         ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
@@ -642,6 +684,9 @@ static void queue_ui_state_event(const char *state, const char *text)
     }
     if (text) {
         copy_utf8_clipped(event.text, text, sizeof(event.text));
+    }
+    if (question) {
+        copy_utf8_clipped(event.question, question, sizeof(event.question));
     }
     ESP_LOGI(TAG, "queue ui_state state=%s text_len=%u current=%s recording=%d",
              event.state[0] ? event.state : "nil",
@@ -704,32 +749,32 @@ static void queue_time_event(int64_t epoch, int32_t tz_offset_min)
     }
 }
 
-static void front_button_down_cb(void *button_handle, void *usr_data)
+static void talk_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
-    queue_app_event(APP_EVENT_FRONT_DOWN);
+    queue_app_event(APP_EVENT_TALK_DOWN);
 }
 
-static void front_button_up_cb(void *button_handle, void *usr_data)
+static void talk_button_up_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
-    queue_app_event(APP_EVENT_FRONT_UP);
+    queue_app_event(APP_EVENT_TALK_UP);
 }
 
-static void side_button_down_cb(void *button_handle, void *usr_data)
+static void browse_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
-    queue_app_event(APP_EVENT_SIDE_DOWN);
+    queue_app_event(APP_EVENT_BROWSE_DOWN);
 }
 
-static void side_button_up_cb(void *button_handle, void *usr_data)
+static void browse_button_up_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
-    queue_app_event(APP_EVENT_SIDE_UP);
+    queue_app_event(APP_EVENT_BROWSE_UP);
 }
 
 static void ble_connection_cb(bool connected)
@@ -748,6 +793,7 @@ static void ble_control_cb(const char *json)
     const cJSON *event = cJSON_GetObjectItemCaseSensitive(root, "event");
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
+    const cJSON *question = cJSON_GetObjectItemCaseSensitive(root, "question");
     const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "name");
     const cJSON *epoch = cJSON_GetObjectItemCaseSensitive(root, "epoch");
@@ -767,7 +813,8 @@ static void ble_control_cb(const char *json)
                          cJSON_IsNumber(tz_offset) ? (int32_t)tz_offset->valuedouble : 0);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
-        queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "");
+        queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
+                             cJSON_IsString(question) ? question->valuestring : "");
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "interaction_mode") == 0 &&
                cJSON_IsString(mode)) {
         if (strcmp(mode->valuestring, "click_to_talk") == 0) {
@@ -794,7 +841,7 @@ static uint32_t elapsed_button_ms(int64_t down_us)
 }
 
 /*
- * Wie lange die vordere Taste wirklich unten war.
+ * Wie lange die Sprechtaste wirklich unten war.
  *
  * Kam das Loslassen ueber den Abgleich im Aufnahme-Takt statt als Ereignis,
  * zaehlt der Zeitpunkt, an dem der Pin es zuerst gemeldet hat. Sonst zaehlte
@@ -810,7 +857,7 @@ static uint32_t primary_hold_ms(void)
     return elapsed_button_ms(s_primary_down_us);
 }
 
-static void apply_app_ui_state(const char *state, const char *text)
+static void apply_app_ui_state(const char *state, const char *text, const char *question)
 {
     ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
              state ? state : "nil",
@@ -826,7 +873,7 @@ static void apply_app_ui_state(const char *state, const char *text)
         s_app_ui_state = APP_UI_STATE_READY;
         /* Traegt die Antwort einen Text, gehoert er aufs Display — bisher
          * wurde er hier verworfen und war damit nur in der App zu sehen. */
-        ui_status_set_idle_text(text);
+        ui_status_set_idle_text(text, question);
         /*
          * Nur bei echtem Inhalt einen Ton: die Bruecke setzt "ready" auch
          * beim Verbinden und nach einer verworfenen, zu kurzen Aufnahme.
@@ -873,7 +920,12 @@ static void apply_app_ui_state(const char *state, const char *text)
 static void apply_interaction_mode(interaction_mode_t mode)
 {
     s_interaction_mode = mode;
-    ui_status_set_idle_hint(mode == INTERACTION_MODE_CLICK_TO_TALK ? "Tippen zum Sprechen" : "Halten zum Sprechen");
+    /*
+     * Die Bedienart steht nicht mehr auf dem Schirm: Der Bereitzustand zeigt
+     * die Uhrzeit, und "Halten zum Sprechen" hat dort niemand mehr gebraucht
+     * (ui_status.c, ui_status_set_idle). Sie steuert weiterhin, was ein Druck
+     * bewirkt — nur eben ohne Beschriftung.
+     */
     if (s_app_ui_state == APP_UI_STATE_READY && !s_recording) {
         ui_status_set_idle();
     }
@@ -910,8 +962,8 @@ static void app_event_task(void *arg)
         }
 
         switch (event.type) {
-        case APP_EVENT_FRONT_DOWN:
-            ESP_LOGI(TAG, "button front down");
+        case APP_EVENT_TALK_DOWN:
+            ESP_LOGI(TAG, "button talk down");
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_HOLD_TO_TALK && s_recording) {
                 /*
@@ -924,7 +976,8 @@ static void app_event_task(void *arg)
                  * also entweder ein verlorengegangenes Loslassen oder der
                  * ausdrueckliche Wunsch aufzuhoeren. Beides endet hier gleich,
                  * und der Ausweg liegt auf der Taste, die man ohnehin schon
-                 * unter dem Daumen hat, statt auf der an der Kante.
+                 * unter dem Finger hat. Seit die Blaettertaste waehrend der
+                 * Aufnahme nichts mehr tut, ist es sogar der einzige.
                  */
                 ESP_LOGI(TAG, "zweiter Druck bei laufender Aufnahme -> Abbruch");
                 abort_recording();
@@ -938,14 +991,14 @@ static void app_event_task(void *arg)
                 esp_err_t primary_up_err = voice_ble_send_button_click("primary", primary_duration_ms,
                                                                        s_primary_session_id);
                 if (s_primary_session_id != 0 && primary_up_err != ESP_OK) {
-                    apply_app_ui_state("ready", "");
+                    apply_app_ui_state("ready", "", "");
                 }
                 s_primary_down_us = 0;
                 s_primary_session_id = 0;
             } else {
                 s_primary_down_us = esp_timer_get_time();
                 if (s_app_ui_state == APP_UI_STATE_PENDING_CONFIRMATION) {
-                    ESP_LOGI(TAG, "button front down as pending confirmation control");
+                    ESP_LOGI(TAG, "button talk down as pending confirmation control");
                     s_primary_session_id = 0;
                     (void)voice_ble_send_button_click("primary", 0, 0);
                     break;
@@ -961,12 +1014,12 @@ static void app_event_task(void *arg)
                 if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
                     (void)stop_recording();
                     s_primary_session_id = 0;
-                    apply_app_ui_state("ready", "");
+                    apply_app_ui_state("ready", "", "");
                 }
             }
             break;
-        case APP_EVENT_FRONT_UP:
-            ESP_LOGI(TAG, "button front up");
+        case APP_EVENT_TALK_UP:
+            ESP_LOGI(TAG, "button talk up");
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK) {
                 break;
@@ -989,40 +1042,52 @@ static void app_event_task(void *arg)
             esp_err_t primary_up_err = voice_ble_send_button_up("primary", primary_duration_ms,
                                                                 s_primary_session_id);
             if (s_primary_session_id != 0 && primary_up_err != ESP_OK) {
-                apply_app_ui_state("ready", "");
+                apply_app_ui_state("ready", "", "");
             }
             s_primary_down_us = 0;
             s_primary_release_us = 0;
             s_primary_session_id = 0;
             break;
-        case APP_EVENT_SIDE_DOWN:
-            ESP_LOGI(TAG, "button side down");
+        case APP_EVENT_BROWSE_DOWN:
+            ESP_LOGI(TAG, "button browse down");
             note_activity();
             s_secondary_down_us = esp_timer_get_time();
             break;
-        case APP_EVENT_SIDE_UP: {
-            ESP_LOGI(TAG, "button side up");
+        case APP_EVENT_BROWSE_UP: {
+            ESP_LOGI(TAG, "button browse up");
             note_activity();
             const uint32_t secondary_duration_ms = elapsed_button_ms(s_secondary_down_us);
             s_secondary_down_us = 0;
 
             if (s_recording) {
-                /* Abbruch, wie beim zweiten Druck auf die vordere Taste. */
-                abort_recording();
-                ui_status_set_cancelled();
-                play_cancel_tone();
+                /*
+                 * Waehrend der Aufnahme tut diese Taste nichts -- und das ist
+                 * die Aenderung, um die es geht.
+                 *
+                 * Frueher brach sie ab. Damals sass sie an der Kante und
+                 * wurde nur mit Absicht getroffen; heute ist sie die grosse
+                 * Flaeche auf der Front, die am Handgelenk von selbst
+                 * ausloest. Eine Taste, die versehentlich gedrueckt wird,
+                 * darf keinen laufenden Satz vernichten. Der Ausweg liegt
+                 * weiterhin auf der Sprechtaste selbst: ein zweiter Druck
+                 * darauf bricht ab.
+                 */
+                ESP_LOGI(TAG, "Blaettertaste waehrend der Aufnahme -> ignoriert");
+                voice_ble_send_button_click("secondary", secondary_duration_ms, 0);
                 break;
             }
 
-            if (s_app_ui_state == APP_UI_STATE_READY) {
-                /* Kurzer Druck im Ruhezustand holt die letzte Antwort zurueck. */
-                ui_status_show_last_answer();
-            }
+            /*
+             * Sonst: einen Schritt zurueck durch die letzten Fragen und
+             * Antworten. Der erste Druck holt die juengste zurueck -- genau
+             * das, was diese Taste vorher auch tat, nur endete es dort.
+             */
+            ui_status_browse_history();
             voice_ble_send_button_click("secondary", secondary_duration_ms, 0);
             break;
         }
         case APP_EVENT_UI_STATE:
-            apply_app_ui_state(event.state, event.text);
+            apply_app_ui_state(event.state, event.text, event.question);
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
@@ -1116,7 +1181,7 @@ static void app_event_task(void *arg)
                  * des Pins wuerde sonst mitten im Satz abschneiden. 400 ms
                  * merkt beim Loslassen niemand, ein Fehlschnitt sehr wohl.
                  */
-                if (stick_s3_front_button_pressed()) {
+                if (stick_s3_talk_button_pressed()) {
                     s_release_ticks = 0;
                     s_primary_release_us = 0;
                 } else {
@@ -1141,7 +1206,7 @@ static void app_event_task(void *arg)
                      */
                     ESP_LOGW(TAG, "Taste ist los, Aufnahme laeuft noch -> beenden");
                     s_release_ticks = 0;
-                    queue_app_event(APP_EVENT_FRONT_UP);
+                    queue_app_event(APP_EVENT_TALK_UP);
                     break;
                 }
             }
@@ -1163,7 +1228,7 @@ static void app_event_task(void *arg)
                     ? voice_ble_send_button_click("primary", elapsed_ms, session_id)
                     : voice_ble_send_button_up("primary", elapsed_ms, session_id);
                 if (session_id != 0 && limit_err != ESP_OK) {
-                    apply_app_ui_state("ready", "");
+                    apply_app_ui_state("ready", "", "");
                 }
                 s_primary_down_us = 0;
                 s_primary_session_id = 0;
@@ -1174,7 +1239,7 @@ static void app_event_task(void *arg)
             if (!s_recording && (s_app_ui_state == APP_UI_STATE_RECORDING ||
                                  s_app_ui_state == APP_UI_STATE_THINKING)) {
                 ESP_LOGW(TAG, "host response timeout, returning to ready");
-                apply_app_ui_state("ready", "");
+                apply_app_ui_state("ready", "", "");
             }
             break;
         }
@@ -1200,32 +1265,32 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_FRONT, &s_front_button);
+    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_TALK, &s_talk_button);
     if (err != ESP_OK) {
         return err;
     }
-    err = init_gpio_button(STICK_S3_PIN_BUTTON_SIDE, &s_side_button);
+    err = init_gpio_button(STICK_S3_PIN_BUTTON_BROWSE, &s_browse_button);
     if (err != ESP_OK) {
         return err;
     }
 
-    err = iot_button_register_cb(s_front_button, BUTTON_PRESS_DOWN, NULL,
-                                 front_button_down_cb, NULL);
+    err = iot_button_register_cb(s_talk_button, BUTTON_PRESS_DOWN, NULL,
+                                 talk_button_down_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
-    err = iot_button_register_cb(s_front_button, BUTTON_PRESS_UP, NULL,
-                                 front_button_up_cb, NULL);
+    err = iot_button_register_cb(s_talk_button, BUTTON_PRESS_UP, NULL,
+                                 talk_button_up_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
-    err = iot_button_register_cb(s_side_button, BUTTON_PRESS_DOWN, NULL,
-                                 side_button_down_cb, NULL);
+    err = iot_button_register_cb(s_browse_button, BUTTON_PRESS_DOWN, NULL,
+                                 browse_button_down_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
-    err = iot_button_register_cb(s_side_button, BUTTON_PRESS_UP, NULL,
-                                 side_button_up_cb, NULL);
+    err = iot_button_register_cb(s_browse_button, BUTTON_PRESS_UP, NULL,
+                                 browse_button_up_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }

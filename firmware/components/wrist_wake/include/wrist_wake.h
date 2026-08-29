@@ -8,7 +8,7 @@
  * Handgelenk anheben statt Knopf druecken.
  *
  * Warum ueberhaupt: Der Schirm dunkelt nach 30 Sekunden ab. Wer danach die
- * Uhrzeit sehen will, musste bisher die Seitentaste druecken — mit der
+ * Uhrzeit sehen will, musste bisher eine Taste druecken — mit der
  * anderen Hand, was am Handgelenk genau die Bewegung ist, die eine Uhr
  * ueberfluessig machen soll.
  *

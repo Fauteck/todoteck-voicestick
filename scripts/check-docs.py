@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VOICE_BLE_C = ROOT / "firmware/components/voice_ble/voice_ble.c"
 MAIN_C = ROOT / "firmware/main/main.c"
 UI_STATUS_C = ROOT / "firmware/components/ui_status/ui_status.c"
+BOARD_H = ROOT / "firmware/components/stick_s3_board/include/stick_s3_board.h"
 VERSION_TXT = ROOT / "firmware/version.txt"
 README = ROOT / "README.md"
 PROTOCOL = ROOT / "docs/protocol.md"
@@ -158,6 +159,43 @@ def check_device_info() -> None:
         )
 
 
+# --- Tastenrollen: docs/protocol.md gegen stick_s3_board.h ------------------
+
+def check_button_roles() -> None:
+    """Welche Taste spricht und welche blaettert.
+
+    Die Zuordnung hat 08/2026 gewechselt, und sie steht an zwei Stellen: als
+    Makro im Board-Header und als Tabelle im Protokoll. Genau die Sorte
+    Aussage, die beim naechsten Wechsel an einer der beiden Stellen stehen
+    bleibt -- die Doku behauptet dann eine Belegung, die das Geraet nicht hat,
+    und niemand merkt es, weil das Protokoll ja nur Rollen kennt.
+    """
+    source = BOARD_H.read_text(encoding="utf-8")
+
+    pins = dict(re.findall(r"#define\s+STICK_S3_PIN_BUTTON_(FRONT|SIDE)\s+(\d+)", source))
+    rollen = dict(re.findall(
+        r"#define\s+STICK_S3_PIN_BUTTON_(TALK|BROWSE)\s+STICK_S3_PIN_BUTTON_(FRONT|SIDE)",
+        source))
+    if len(pins) != 2 or len(rollen) != 2:
+        fail("tasten-rollen", PROTOCOL, "Tastenbelegung in stick_s3_board.h nicht lesbar")
+        return
+
+    # Rolle im Protokoll <- Rolle im Code: sprechen ist `primary`.
+    code = {
+        "primary": (rollen["TALK"].lower(), pins[rollen["TALK"]]),
+        "secondary": (rollen["BROWSE"].lower(), pins[rollen["BROWSE"]]),
+    }
+
+    doc = {}
+    for zeile in region(PROTOCOL, "tasten-rollen").splitlines():
+        treffer = re.match(r"\|\s*`(primary|secondary)`\s*\|\s*(front|side)\b[^|]*\|\s*(\d+)\s*\|",
+                           zeile.strip())
+        if treffer:
+            doc[treffer.group(1)] = (treffer.group(2), treffer.group(3))
+
+    compare("tasten-rollen", PROTOCOL, "Tastenrollen", doc, code)
+
+
 # --- Schriftstufen: README gegen ui_status.c -------------------------------
 
 def check_font_steps() -> None:
@@ -188,7 +226,8 @@ def check_dependencies() -> None:
 
 
 def main() -> int:
-    checks = (check_gatt, check_device_info, check_font_steps, check_dependencies)
+    checks = (check_gatt, check_device_info, check_button_roles, check_font_steps,
+              check_dependencies)
     for check in checks:
         try:
             check()

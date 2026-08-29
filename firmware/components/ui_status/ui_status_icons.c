@@ -21,8 +21,8 @@
  *   Augenanker   46 % entlang V->B         Augenradius  0,25 * Strichstaerke
  *   Augenabstand +/- 0,29 * Strichstaerke  Pupille      0,12 * Strichstaerke
  *
- * Hier unten steht deshalb nur ICON_BOX; alles andere faellt daraus. Wer die
- * Figur groesser oder kleiner will, aendert genau diese eine Zahl.
+ * Hier unten steht deshalb nur die Flaeche; alles andere faellt daraus. Wer
+ * die Figur groesser oder kleiner will, aendert genau diese eine Zahl.
  *
  * ── Warum die Figur schmaler ist als ihre Flaeche ───────────────────────────
  * Drei Szenen kippen die Figur um den Knick (Ruht +8, Hoert zu -7, Fehler +9).
@@ -50,29 +50,48 @@
 
 /* ── Flaeche und Lage ─────────────────────────────────────────────────────── */
 /*
- * Im Querformat steht Tecki links, der Text rechts daneben — die 64 hier und
- * TECKI_BOX in ui_status.c sind dieselbe Spalte und muessen zusammenpassen.
- * Hochkant war die Flaeche 112 breit; auf 119 Pixeln Hoehe waere das die
- * ganze Anzeige gewesen, und der Text haette nichts mehr uebrig gehabt.
+ * Im Querformat steht Tecki links, der Text rechts daneben — UI_TECKI_BOX
+ * und TECKI_BOX in ui_status.c sind dieselbe Spalte und muessen
+ * zusammenpassen. Hochkant war die Flaeche 112 breit; auf 119 Pixeln Hoehe
+ * waere das die ganze Anzeige gewesen, und der Text haette nichts mehr uebrig
+ * gehabt.
+ *
+ * Seit dem Ziffernblatt gibt es zwei Flaechen statt einer: Auf dem Zifferblatt
+ * (Bereit und Ruht) sitzt Tecki klein in der Ecke, damit die Uhrzeit den
+ * Schirm bekommt. Ueberall sonst bleibt er in seiner Spalte. Die Flaeche ist
+ * deshalb eine Laufzeitgroesse, kein Makro mehr — die Geometrie faellt
+ * weiterhin vollstaendig aus ihr heraus, sie wird nur bei einem Wechsel neu
+ * ausgerechnet statt einmal beim Anlegen.
  */
-#define ICON_BOX    64
-#define ICON_LEFT_X 0
-#define ICON_TOP_Y  35
+static int32_t s_box = UI_TECKI_BOX;
+static int32_t s_icon_x;
+static int32_t s_icon_y = 35;
 
 /* ── Geometrie, alles abgeleitet ──────────────────────────────────────────── */
 /*
  * 90,625 Prozent der Flaeche — frueher stand hier 101,5 zu 112, dieselbe
  * Zahl. Als Verhaeltnis statt als Absolutwert, damit die Begruendung darunter
  * auch bei einer anderen Flaeche noch stimmt: Wer die Figur groesser oder
- * kleiner will, aendert ICON_BOX, und der Rand waechst mit.
+ * kleiner will, aendert die Flaeche, und der Rand waechst mit.
  */
-#define MARK_WIDTH (0.90625f * ICON_BOX)
+#define MARK_WIDTH (0.90625f * (float)s_box)
 #define MARK_K     (MARK_WIDTH / 336.0f)
 #define STROKE_W   (76.0f * MARK_K)
 #define EYE_R      (0.25f * STROKE_W)
 #define PUPIL_R    (0.12f * STROKE_W)
 #define LID_H      (0.07f * STROKE_W)
 #define CROSS_W    (0.10f * STROKE_W)
+
+/*
+ * Die duennste Linie, die der Zeichner noch sichtbar ausgibt. Bei der kleinen
+ * Flaeche faellt die Strichstaerke der Kreuze sonst unter einen Pixel und die
+ * Fehler-Augen verschwaenden ganz.
+ */
+static int32_t line_width(float w)
+{
+    const int32_t px = (int32_t)lroundf(w);
+    return px < 1 ? 1 : px;
+}
 
 /*
  * Punkte im 512er Raster, verschoben auf den Ursprung der Bounding-Box
@@ -163,8 +182,8 @@ static void rotate_about(float px, float py, float ox, float oy, float rad, floa
 
 static void compute_geometry(void)
 {
-    const float x0 = (ICON_BOX - MARK_WIDTH) / 2.0f;
-    const float y0 = (ICON_BOX - 199.0f * MARK_K) / 2.0f;
+    const float x0 = ((float)s_box - MARK_WIDTH) / 2.0f;
+    const float y0 = ((float)s_box - 199.0f * MARK_K) / 2.0f;
     const float vx = MARK_PTS[1][0] * MARK_K + x0;
     const float vy = MARK_PTS[1][1] * MARK_K + y0;
 
@@ -217,7 +236,7 @@ static lv_obj_t *make_stroke(lv_obj_t *parent)
     lv_obj_t *o = lv_line_create(parent);
     lv_obj_remove_style_all(o);
     lv_obj_set_pos(o, 0, 0);
-    lv_obj_set_size(o, ICON_BOX, ICON_BOX);
+    lv_obj_set_size(o, s_box, s_box);
     lv_obj_set_style_line_rounded(o, true, 0);
     return o;
 }
@@ -246,11 +265,11 @@ void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
     icons->root = lv_obj_create(screen);
     lv_obj_remove_style_all(icons->root);
     lv_obj_remove_flag(icons->root, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(icons->root, ICON_BOX, ICON_BOX);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, ICON_LEFT_X, ICON_TOP_Y);
+    lv_obj_set_size(icons->root, s_box, s_box);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, s_icon_x, s_icon_y);
 
     icons->body = make_stroke(icons->root);
-    lv_obj_set_style_line_width(icons->body, (int32_t)lroundf(STROKE_W), 0);
+    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W), 0);
 
     for (int i = 0; i < 2; i++) {
         icons->eye[i] = make_blob(icons->root);
@@ -263,7 +282,7 @@ void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
     }
     for (int i = 0; i < 4; i++) {
         icons->cross[i] = make_stroke(icons->root);
-        lv_obj_set_style_line_width(icons->cross[i], (int32_t)lroundf(CROSS_W), 0);
+        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W), 0);
         lv_line_set_points(icons->cross[i], s_cross[i], 2);
     }
     for (int i = 0; i < UI_TECKI_THINK_DOTS; i++) {
@@ -357,13 +376,46 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
     };
     for (int i = 0; i < UI_TECKI_THINK_DOTS; i++) {
         lv_obj_set_style_bg_color(icons->dot[i], lv_color_hex(s->mark), 0);
-        place_circle(icons->dot[i], DOT_POS[i][0] * ICON_BOX, DOT_POS[i][1] * ICON_BOX,
-                     DOT_POS[i][2] * STROKE_W);
+        place_circle(icons->dot[i], DOT_POS[i][0] * (float)s_box,
+                     DOT_POS[i][1] * (float)s_box, DOT_POS[i][2] * STROKE_W);
         show(icons->dot[i], s->dots);
     }
 
     lv_obj_set_style_opa(icons->root, s->opa, 0);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, ICON_LEFT_X, ICON_TOP_Y);
+    lv_obj_set_size(icons->root, s_box, s_box);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, s_icon_x, s_icon_y);
+}
+
+/*
+ * Flaeche und Ecke fuer die naechste Szene.
+ *
+ * Die Punkte werden nur neu gerechnet, wenn sich die Flaeche wirklich
+ * geaendert hat: Das sind sieben Szenen mal fuenf gedrehte Punkte, also
+ * einige Dutzend Sinus-Aufrufe — nichts, was bei einem Szenenwechsel
+ * auffiele, aber auch nichts, was bei jedem Nachziehen der Minute laufen
+ * muss. `lv_line` behaelt den Zeiger auf die Punkte, deshalb setzt der
+ * anschliessende ui_status_icons_apply() sie ohnehin neu.
+ */
+void ui_status_icons_set_box(ui_status_icons_t *icons, int32_t box, int32_t x, int32_t y)
+{
+    s_icon_x = x;
+    s_icon_y = y;
+    if (box == s_box) {
+        return;
+    }
+    s_box = box;
+    compute_geometry();
+    if (icons->root == NULL) {
+        return;
+    }
+    lv_obj_set_size(icons->root, s_box, s_box);
+    lv_obj_set_size(icons->body, s_box, s_box);
+    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W), 0);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_size(icons->cross[i], s_box, s_box);
+        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W), 0);
+        lv_line_set_points(icons->cross[i], s_cross[i], 2);
+    }
 }
 
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene)

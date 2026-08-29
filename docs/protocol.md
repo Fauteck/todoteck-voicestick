@@ -91,9 +91,22 @@ Currently emitted state events:
 {"event":"button_up","button":"secondary","duration_ms":90}
 ```
 
-Buttons are named by role instead of physical placement. On StickS3, the front
-button maps to `primary` and the side button maps to `secondary`. `session_id` is
-included when a `primary` press starts or stops a local audio recording.
+Buttons are named by role instead of physical placement, and the Todoteck fork
+is the reason that matters: it swapped the two pins in 08/2026 without changing
+a byte on the wire. `session_id` is included when a `primary` press starts or
+stops a local audio recording.
+
+Which pin carries which role on StickS3:
+
+<!-- doku-vertrag:tasten-rollen -->
+| Role | Button | GPIO |
+| --- | --- | --- |
+| `primary` | side (bottom edge in landscape) | 12 |
+| `secondary` | front (the large blue one) | 11 |
+<!-- /doku-vertrag -->
+
+Upstream firmware has it the other way round. A host cannot tell and does not
+need to: it sees roles, never pins.
 
 ### Fork addition: `recording_discarded`
 
@@ -114,9 +127,14 @@ Three situations produce it, and the app does not need to tell them apart:
 
 | Situation | Screen |
 | --- | --- |
-| The `secondary` button is pressed while recording | `Abgebrochen` |
 | The `primary` button is pressed *again* while recording | `Abgebrochen` |
 | The `primary` button was held for less than 500 ms | `Zu kurz` |
+
+A `secondary` press while recording used to be a third situation. It is not any
+more: since that role moved to the large front button, it is the one that fires
+by accident on a wrist, and an accidental press must not be able to destroy a
+sentence in progress. The abort now lives only on the button that is already
+under the finger.
 
 The 500 ms match `MIN_TURN_MILLIS` in the Todoteck bridge, which dropped such
 takes anyway — silently, and only after they had been transferred.
@@ -152,6 +170,25 @@ The desktop helper always includes a `text` field, even for states without text
 content. Firmware may immediately render local physical feedback, such as
 switching Tecki to the recording pose when the primary button starts audio, but
 the app's `ui_state` is the authoritative display state.
+
+### Fork addition: `question` on `ui_state`
+
+The Todoteck bridge adds one optional field to the `ready` state:
+
+```json
+{"event":"ui_state","state":"ready","text":"Aufgabe angelegt: Pool rückspülen","question":"Leg eine Aufgabe an, Pool rückspülen"}
+```
+
+`question` is what the host understood — the transcript, not the answer. The
+fork shows it as the headline above the answer and keeps both in a five-entry
+ring that the `secondary` button steps through. It rides in the same write as
+the answer so the two cannot drift apart, and it is budgeted at 64 bytes:
+inside one 244-byte write the answer is the content and the question is its
+label.
+
+Optional in both directions. A host that does not send it leaves the screen as
+it was (the status word `Bereit` above the answer); firmware that does not know
+it ignores an unknown JSON field, as it always has.
 
 The fork renders the `text` field: it arrives with `ready` and is shown as the
 answer, in the largest of six font sizes that fits, with Tecki stepping aside

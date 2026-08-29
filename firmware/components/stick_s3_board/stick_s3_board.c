@@ -232,9 +232,9 @@ esp_err_t stick_s3_board_init(void)
     return gpio_config(&button_config);
 }
 
-bool stick_s3_front_button_pressed(void)
+bool stick_s3_talk_button_pressed(void)
 {
-    return read_active_low_button(STICK_S3_PIN_BUTTON_FRONT);
+    return read_active_low_button(STICK_S3_PIN_BUTTON_TALK);
 }
 
 i2c_master_bus_handle_t stick_s3_board_i2c_bus(void)
@@ -366,7 +366,7 @@ void stick_s3_board_prepare_deep_sleep(void)
                                                   M5PM1_GPIO2_L3B_POWER_EN, 0));
 }
 
-bool stick_s3_side_button_pressed(void)
+bool stick_s3_browse_button_pressed(void)
 {
-    return read_active_low_button(STICK_S3_PIN_BUTTON_SIDE);
+    return read_active_low_button(STICK_S3_PIN_BUTTON_BROWSE);
 }
