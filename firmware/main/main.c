@@ -30,13 +30,35 @@
 static const char *TAG = "voice_stick";
 
 #define BATTERY_REFRESH_FALLBACK_MS (10 * 1000)
-#define DISPLAY_DIM_TIMEOUT_MS (30 * 1000)
+/*
+ * Abdunkeln nach 15 statt 30 Sekunden (08/2026). Der helle Schirm ist der
+ * teuerste Zustand des Geraets, und abgedunkelt bleibt die Uhrzeit lesbar --
+ * das Fenster, in dem beides gilt, darf deshalb kurz sein. Der Tiefschlaf
+ * bleibt bei fuenf Minuten: Aus ihm zurueck kostet einen Neustart samt neuer
+ * BLE-Verbindung, das Aufhellen dagegen nur einen Tastendruck.
+ */
+#define DISPLAY_DIM_TIMEOUT_MS (15 * 1000)
 #define DISPLAY_ACTIVE_BRIGHTNESS 128
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
+/*
+ * Handgelenk-Geste stillgelegt (08/2026).
+ *
+ * Aus dem gedunkelten Schirm soll nur ein Tastendruck in den hellen Zustand
+ * fuehren, keine Bewegung. Aus dem Tiefschlaf war das ohnehin schon so (ext1
+ * auf beide Tasten); der Schritt "gedunkelt -> hell" ist der einzige, den die
+ * Geste je bedient hat.
+ *
+ * Stillgelegt statt entfernt: Die Komponente wrist_wake bleibt vollstaendig
+ * im Baum. Auf 1 gesetzt ist die Geste wieder da. Auf 0 wird der BMI270 gar
+ * nicht erst aufgesetzt — kein Abfrage-Task, kein Sensorstrom, und die
+ * uebrigen Aufrufe (watch(false), prepare_deep_sleep) laufen ohne Sensor
+ * folgenlos ins Leere.
+ */
+#define WRIST_WAKE_ENABLED 0
 /*
  * Dieselbe Grenze, die der Server zieht (MAX_AUDIO_SECONDS in
  * voiceTurnService.ts). Sie hier zu kennen heisst: der Balken kann sie
@@ -718,6 +740,7 @@ static void queue_device_name_event(const char *name)
     }
 }
 
+#if WRIST_WAKE_ENABLED
 /*
  * Das Handgelenk wurde angehoben. Laeuft im Abfrage-Task des Sensors, geht
  * deshalb ueber dieselbe Warteschlange wie die Tasten — die Anzeige wird nur
@@ -727,6 +750,7 @@ static void wrist_raise_cb(void)
 {
     queue_app_event(APP_EVENT_WRIST_RAISE);
 }
+#endif
 
 /*
  * Die Uhrzeit kommt von der Bruecke — das Geraet hat weder RTC-Baustein noch
@@ -1152,8 +1176,14 @@ static void app_event_task(void *arg)
              * Zeitgeber fuer Abdunkeln und Tiefschlaf von vorn. Kein
              * Szenenwechsel — wer aufs Handgelenk schaut, will sehen, was
              * ohnehin dasteht.
+             *
+             * Stillgelegt: Das Ereignis wird nur noch eingereiht, wenn
+             * WRIST_WAKE_ENABLED gesetzt ist. Der Zweig bleibt stehen, damit
+             * der switch alle Ereignisse abdeckt.
              */
+#if WRIST_WAKE_ENABLED
             note_activity();
+#endif
             break;
         case APP_EVENT_TIME:
             s_clock_offset_min = event.tz_offset_min;
@@ -1309,8 +1339,10 @@ static void display_dim_timer_cb(void *arg)
         if (err == ESP_OK) {
             s_display_dimmed = true;
             ui_status_set_idle_dimmed(true);
+#if WRIST_WAKE_ENABLED
             /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
             wrist_wake_watch(true);
+#endif
             ESP_LOGI(TAG, "display dimmed after inactivity");
         } else {
             ESP_LOGW(TAG, "dim display failed: %s", esp_err_to_name(err));
@@ -1494,8 +1526,10 @@ void app_main(void)
     ESP_ERROR_CHECK(init_host_response_timer());
     ESP_ERROR_CHECK(init_recording_tick_timer());
     ESP_ERROR_CHECK(audio_tone_init());
+#if WRIST_WAKE_ENABLED
     /* Ohne Sensor faellt nur die Geste weg — der Rueckgabewert ist deshalb kein Abbruchgrund. */
     (void)wrist_wake_init(wrist_raise_cb);
+#endif
     if (s_clock_valid) {
         /* Aus dem Tiefschlaf zurueck: Zeit lief weiter, der Abstand kommt aus dem RTC-Speicher. */
         ui_status_restore_clock(s_clock_offset_min);

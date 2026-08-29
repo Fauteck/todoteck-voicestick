@@ -205,7 +205,7 @@ static lv_color_t s_muted_colour;
  *
  * Bis 08/2026 stand hier eine einzige Zeichenkette — die letzte Antwort, die
  * ein Druck auf die damalige Seitentaste zurueckholte. Der Fall dahinter bleibt
- * derselbe (der Schirm dimmt nach 30 Sekunden und schlaeft nach fuenf
+ * derselbe (der Schirm dimmt nach 15 Sekunden und schlaeft nach fuenf
  * Minuten; wer erst danach hinsieht, hat nichts gelesen), er hoert nur nicht
  * bei eins auf: Wer drei Sachen hintereinander diktiert und dann nachsieht,
  * will alle drei.
@@ -1346,7 +1346,7 @@ void ui_status_set_idle_text(const char *text, const char *question)
  *
  * Der Fall dahinter ist derselbe wie frueher bei der Seitentaste (die
  * inzwischen die sprechende ist): Das Display
- * dimmt nach 30 Sekunden und schlaeft nach fuenf Minuten ganz ein; wer den
+ * dimmt nach 15 Sekunden und schlaeft nach fuenf Minuten ganz ein; wer den
  * Stick erst danach ansieht, hat die Antwort nie gelesen. Sie noch einmal zu
  * zeigen kostet nichts — sie erneut zu erfragen kostet Transkription, Intent
  * und womoeglich eine zweite Aufgabe. Neu ist nur, dass es nicht bei der
