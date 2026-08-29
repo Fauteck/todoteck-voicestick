@@ -485,16 +485,29 @@ static text_layout_t plan_text_layout(const char *status, const char *text, ui_t
  */
 static bool clock_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
 {
-    if (!s_clock_valid || kind != UI_TEXT_HINT) {
+    if (kind != UI_TEXT_HINT) {
         return false;
     }
     return scene == UI_STATUS_ICON_IDLE || scene == UI_STATUS_ICON_PAIRING ||
            scene == UI_STATUS_ICON_RESTING;
 }
 
-/* "07:42" aus der Systemzeit plus gemeldetem Abstand zur UTC. */
+/*
+ * "07:42" aus der Systemzeit plus gemeldetem Abstand zur UTC — und "--:--",
+ * solange keine Zeit gestellt wurde.
+ *
+ * Die Striche statt einer leeren Flaeche sind Absicht: Ohne sie sieht ein
+ * Geraet, dessen Bruecke die Zeit nicht schickt, genauso aus wie eines mit
+ * alter Firmware. Genau diese Verwechslung ist beim ersten Praxistest
+ * passiert. Eine geratene Uhrzeit waere schlechter als keine — "unbekannt"
+ * anzuzeigen ist etwas anderes als zu raten.
+ */
 static void format_clock(char *out, size_t size)
 {
+    if (!s_clock_valid) {
+        snprintf(out, size, "--:--");
+        return;
+    }
     const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
     struct tm parts;
     gmtime_r(&now, &parts);
@@ -635,8 +648,7 @@ static void render_current_locked(void)
 static void clock_tick_cb(lv_timer_t *timer)
 {
     (void)timer;
-    if (!s_ready || !s_clock_valid || !s_clock_label ||
-        lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
+    if (!s_ready || !s_clock_label || lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
     char now[8];
