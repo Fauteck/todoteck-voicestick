@@ -113,14 +113,10 @@ static _lock_t s_lvgl_lock;
 static bool s_ready;
 static lv_display_t *s_display;
 static lv_obj_t *s_screen;
-static lv_obj_t *s_top_label;
 static lv_obj_t *s_ble_dot;
 static lv_obj_t *s_status_label;
 static lv_obj_t *s_hint_label;
 static lv_obj_t *s_clock_label;
-static lv_obj_t *s_battery_shell;
-static lv_obj_t *s_battery_fill;
-static lv_obj_t *s_battery_tip;
 static lv_obj_t *s_battery_label;
 static lv_obj_t *s_meter_track;
 static lv_obj_t *s_meter_fill;
@@ -153,6 +149,11 @@ static int32_t s_clock_offset_min;
  * Display steht.
  */
 static bool s_link_connected;
+/* Faerbt die Akkuzahl: rot unter 20 Prozent, blau am Strom, sonst gedaempft. */
+static bool s_battery_low;
+static bool s_battery_charging;
+/* Gedaempfte Farbe der laufenden Szene — hell auf Creme, blass auf Dunkel. */
+static lv_color_t s_muted_colour;
 /*
  * Die letzte Antwort ueberlebt den Bildschirmwechsel: nach Ruhezustand oder
  * Fehler ist sie sonst weg, obwohl man sie vielleicht nur nicht rechtzeitig
@@ -210,39 +211,22 @@ static lv_obj_t *create_blob(lv_obj_t *parent, int32_t w, int32_t h, lv_color_t 
     return obj;
 }
 
+/*
+ * Der Akku steht als Zahl da, nicht als Zeichnung.
+ *
+ * Das Symbol daneben sagte dasselbe noch einmal, nur ungenauer — und auf
+ * einem Ziffernblatt zaehlt jeder Pixel, den etwas nicht braucht. Geblieben
+ * ist die Prozentzahl; der farbige Fuellstand war ohnehin nur auf zwei
+ * Stufen unterscheidbar.
+ */
 static void create_battery_ui(lv_obj_t *screen)
 {
-    s_battery_shell = lv_obj_create(screen);
-    lv_obj_remove_style_all(s_battery_shell);
-    lv_obj_set_size(s_battery_shell, 20, 10);
-    lv_obj_set_style_radius(s_battery_shell, 3, 0);
-    lv_obj_set_style_border_width(s_battery_shell, 1, 0);
-    lv_obj_set_style_border_color(s_battery_shell, lv_color_hex(0x675f71), 0);
-    lv_obj_set_style_bg_opa(s_battery_shell, LV_OPA_TRANSP, 0);
-    lv_obj_align(s_battery_shell, LV_ALIGN_TOP_RIGHT, -31, 4);
-
-    s_battery_fill = lv_obj_create(s_battery_shell);
-    lv_obj_remove_style_all(s_battery_fill);
-    lv_obj_set_size(s_battery_fill, 12, 6);
-    lv_obj_set_style_radius(s_battery_fill, 2, 0);
-    lv_obj_set_style_bg_opa(s_battery_fill, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_battery_fill, lv_color_hex(0x67c59b), 0);
-    lv_obj_align(s_battery_fill, LV_ALIGN_LEFT_MID, 2, 0);
-
-    s_battery_tip = lv_obj_create(screen);
-    lv_obj_remove_style_all(s_battery_tip);
-    lv_obj_set_size(s_battery_tip, 2, 5);
-    lv_obj_set_style_radius(s_battery_tip, 2, 0);
-    lv_obj_set_style_bg_opa(s_battery_tip, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_battery_tip, lv_color_hex(0x675f71), 0);
-    lv_obj_align_to(s_battery_tip, s_battery_shell, LV_ALIGN_OUT_RIGHT_MID, 1, 0);
-
     s_battery_label = lv_label_create(screen);
     lv_label_set_text(s_battery_label, "--%");
     lv_obj_set_style_text_color(s_battery_label, lv_color_hex(0x675f71), 0);
     lv_obj_set_style_text_font(s_battery_label, &todoteck_font_10, 0);
     lv_label_set_long_mode(s_battery_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_battery_label, 28);
+    lv_obj_set_width(s_battery_label, 34);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, 4);
 }
@@ -353,8 +337,20 @@ static void create_meters(lv_obj_t *screen)
  * zu — und die eingebaute Schrift gibt es in Groessen, die wir nicht selbst
  * erzeugen muessen.
  */
+/*
+ * Zwei Ziffernblaetter, weil zwei Fragen dahinterstehen.
+ *
+ * In "Bereit" und "Ruht" ist die Statuszeile eine Selbstverstaendlichkeit —
+ * dass das Geraet bereit ist, sieht man daran, dass es nichts anderes sagt.
+ * Der Platz gehoert dort der Uhrzeit, und die wird so gross, wie die Spalte
+ * sie traegt (Montserrat 48: "07:42" misst rund 118 von 150 Pixeln).
+ *
+ * In "Koppeln" bleibt das Wort stehen: Dass keine Bruecke da ist, sieht man
+ * sonst nirgends — und daneben passt die Uhr nur in der kleineren Stufe.
+ */
 #define CLOCK_STATUS_Y (HEADER_H + 4)
 #define CLOCK_Y (HEADER_H + 28)
+#define CLOCK_BIG_Y (HEADER_H + 14)
 #define CLOCK_HINT_Y (CONTENT_H - 22)
 /* Wie oft die Anzeige nachzieht. Sekunden zeigt sie nicht, Minuten genuegen. */
 #define CLOCK_TICK_MS 10000
@@ -485,20 +481,59 @@ static text_layout_t plan_text_layout(const char *status, const char *text, ui_t
  */
 static bool clock_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
 {
-    if (!s_clock_valid || kind != UI_TEXT_HINT) {
+    if (kind != UI_TEXT_HINT) {
         return false;
     }
     return scene == UI_STATUS_ICON_IDLE || scene == UI_STATUS_ICON_PAIRING ||
            scene == UI_STATUS_ICON_RESTING;
 }
 
-/* "07:42" aus der Systemzeit plus gemeldetem Abstand zur UTC. */
+/*
+ * Ziffernblatt ohne Statuswort: "Bereit" und "Ruht" sagen nichts, was der
+ * Schirm nicht ohnehin zeigt. "Koppeln" sagt etwas — das bleibt stehen.
+ */
+static bool clock_only_scene(ui_status_icon_scene_t scene, ui_text_kind_t kind)
+{
+    return clock_scene(scene, kind) &&
+           (scene == UI_STATUS_ICON_IDLE || scene == UI_STATUS_ICON_RESTING);
+}
+
+/*
+ * "07:42" aus der Systemzeit plus gemeldetem Abstand zur UTC — und "--:--",
+ * solange keine Zeit gestellt wurde.
+ *
+ * Die Striche statt einer leeren Flaeche sind Absicht: Ohne sie sieht ein
+ * Geraet, dessen Bruecke die Zeit nicht schickt, genauso aus wie eines mit
+ * alter Firmware. Genau diese Verwechslung ist beim ersten Praxistest
+ * passiert. Eine geratene Uhrzeit waere schlechter als keine — "unbekannt"
+ * anzuzeigen ist etwas anderes als zu raten.
+ */
 static void format_clock(char *out, size_t size)
 {
+    if (!s_clock_valid) {
+        snprintf(out, size, "--:--");
+        return;
+    }
     const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
     struct tm parts;
     gmtime_r(&now, &parts);
     snprintf(out, size, "%02d:%02d", parts.tm_hour, parts.tm_min);
+}
+
+/*
+ * Faerbt die Akkuzahl. Sie traegt seit dem Wegfall des Symbols beides: den
+ * Stand als Ziffern und den Zustand als Farbe.
+ */
+static void apply_battery_colour_locked(void)
+{
+    if (!s_battery_label) {
+        return;
+    }
+    lv_obj_set_style_text_color(s_battery_label,
+                                s_battery_low ? lv_color_hex(0xf97373) :
+                                s_battery_charging ? lv_color_hex(0x5ec4ff) :
+                                s_muted_colour,
+                                0);
 }
 
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status, const char *hint)
@@ -523,9 +558,10 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     }
 
     const bool with_clock = clock_scene(scene, s_text_kind);
+    const bool clock_only = clock_only_scene(scene, s_text_kind);
 
     ui_status_icons_show(&s_icons, plan.tecki);
-    lv_label_set_text(s_status_label, status_shown);
+    lv_label_set_text(s_status_label, clock_only ? "" : status_shown);
     lv_obj_set_width(s_status_label, plan.width);
     lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, plan.x,
                  with_clock ? CLOCK_STATUS_Y : plan.status_y);
@@ -534,8 +570,11 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         char clock_text[8];
         format_clock(clock_text, sizeof(clock_text));
         lv_label_set_text(s_clock_label, clock_text);
+        lv_obj_set_style_text_font(s_clock_label,
+                                   clock_only ? &lv_font_montserrat_48 : &lv_font_montserrat_28, 0);
         lv_obj_set_width(s_clock_label, plan.width);
-        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, plan.x, CLOCK_Y);
+        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, plan.x,
+                     clock_only ? CLOCK_BIG_Y : CLOCK_Y);
         lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
@@ -597,7 +636,6 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     lv_obj_set_style_bg_color(s_screen, bg, 0);
     lv_obj_set_style_text_color(s_screen, text, 0);
-    lv_obj_set_style_text_color(s_top_label, muted, 0);
     lv_obj_set_style_bg_color(s_ble_dot, ble, 0);
     lv_obj_set_style_bg_opa(s_ble_dot, s_link_connected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
@@ -605,9 +643,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_text_color(s_status_label, text, 0);
     lv_obj_set_style_text_color(s_clock_label, text, 0);
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
-    lv_obj_set_style_text_color(s_battery_label, muted, 0);
-    lv_obj_set_style_border_color(s_battery_shell, muted, 0);
-    lv_obj_set_style_bg_color(s_battery_tip, muted, 0);
+    s_muted_colour = muted;
+    apply_battery_colour_locked();
 
     ui_status_icons_start_anim(&s_icons, scene);
 }
@@ -635,8 +672,7 @@ static void render_current_locked(void)
 static void clock_tick_cb(lv_timer_t *timer)
 {
     (void)timer;
-    if (!s_ready || !s_clock_valid || !s_clock_label ||
-        lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
+    if (!s_ready || !s_clock_label || lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
     char now[8];
@@ -652,14 +688,6 @@ static void create_status_ui(void)
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0xfff7ed), 0);
     lv_obj_set_style_text_color(s_screen, lv_color_hex(0x3f3440), 0);
     lv_obj_set_style_pad_all(s_screen, 8, 0);
-
-    s_top_label = lv_label_create(s_screen);
-    lv_label_set_text(s_top_label, s_device_name);
-    lv_obj_set_style_text_font(s_top_label, &todoteck_font_10, 0);
-    lv_obj_set_style_text_color(s_top_label, lv_color_hex(0x7f7180), 0);
-    lv_label_set_long_mode(s_top_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_top_label, 66);
-    lv_obj_align(s_top_label, LV_ALIGN_TOP_LEFT, 12, 4);
 
     s_ble_dot = create_blob(s_screen, 8, 8, lv_color_hex(0x8fb8ff));
     lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, 0, 6);
@@ -1000,7 +1028,6 @@ void ui_status_set_device_name(const char *device_name)
 
     _lock_acquire(&s_lvgl_lock);
     if (s_ready) {
-        lv_label_set_text(s_top_label, s_device_name);
     }
     _lock_release(&s_lvgl_lock);
 }
@@ -1218,14 +1245,15 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
 
     _lock_acquire(&s_lvgl_lock);
     if (s_ready) {
-        const int fill_width = MAX(2, (level_percent * 14) / 100);
-        lv_obj_set_width(s_battery_fill, fill_width);
-        lv_obj_set_style_bg_color(s_battery_fill,
-                                  level_percent <= 20 ? lv_color_hex(0xf97373) :
-                                  charging || usb_powered ? lv_color_hex(0x5ec4ff) :
-                                  lv_color_hex(0x67c59b),
-                                  0);
+        /*
+         * Die Zahl traegt jetzt auch die Farbe: rot unter 20 Prozent, blau
+         * am Ladegeraet, sonst gedaempft. Vorher sagte das der Fuellstand
+         * des Symbols — das Symbol ist weg, die Aussage bleibt.
+         */
+        s_battery_low = level_percent <= 20;
+        s_battery_charging = charging || usb_powered;
         lv_label_set_text_fmt(s_battery_label, "%d%%", level_percent);
+        apply_battery_colour_locked();
     }
     _lock_release(&s_lvgl_lock);
 }
