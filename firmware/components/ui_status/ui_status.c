@@ -230,8 +230,16 @@ static uint8_t s_history_next;
  * verlassen hat.
  */
 static int8_t s_history_cursor = -1;
-/* "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt. */
-static char s_position_text[8];
+/*
+ * "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt.
+ *
+ * Zwoelf Byte fuer fuenf Zeichen: Der Uebersetzer rechnet bei `snprintf` mit
+ * dem vollen Wertebereich der beiden Zahlen (bis zu neun Zeichen), nicht mit
+ * dem, den der Ring zulaesst -- und `-Werror=format-truncation` macht daraus
+ * einen Fehler. Vier ungenutzte Byte sind billiger als eine Rechnung, die den
+ * Bereich fuer den Uebersetzer nachweist.
+ */
+static char s_position_text[12];
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -1289,7 +1297,7 @@ void ui_status_browse_history(void)
 {
     char question[UI_QUESTION_MAX];
     char answer[UI_HINT_TEXT_MAX];
-    char position[8];
+    char position[sizeof(s_position_text)];
 
     _lock_acquire(&s_lvgl_lock);
     if (s_history_count == 0) {
