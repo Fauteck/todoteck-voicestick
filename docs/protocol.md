@@ -80,7 +80,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -159,6 +159,32 @@ for text that needs the whole screen. Upstream firmware ignores it for anything
 but picking a fixed English hint, because its LVGL font set is ASCII-only. Both
 behaviours are legal for a host — a bridge cannot tell from the protocol which
 one it is talking to, and the fork's fonts stop at Latin-1 either way.
+
+### Fork addition: `ui_state:no_speech`
+
+The Todoteck fork accepts one further UI state:
+
+```json
+{"event":"ui_state","state":"no_speech","text":"Ich habe nichts gehört."}
+```
+
+It means the turn ran but nobody spoke: the recording was silent, or the
+recognizer invented a sentence out of that silence. Whisper has no way to say
+"there was nothing" — it must emit tokens, and on German silence it falls back
+to the subtitle credit it saw at the end of thousands of training videos
+("Untertitelung des ZDF, 2020"). The Todoteck server detects that case and
+answers the bridge with the reason `no_speech` instead of acting on the
+invented sentence.
+
+The device shows `Nichts gehört` and plays the short low discard tone, not the
+two falling error tones: nothing is broken, the button simply fired in a
+pocket. Without the state, a false trigger arrived as an ordinary answer — the
+screen showed a failed wiki search for a phrase nobody had said.
+
+A bridge learns whether the firmware knows the state from `ui_states` in
+`device_info`; the Todoteck bridges fall back to `error` when it is missing,
+because an unknown state is ignored and would leave the display sitting on
+`thinking`.
 
 ### Fork addition: `device_name`
 

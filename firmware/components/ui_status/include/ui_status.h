@@ -17,6 +17,7 @@ void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_show_last_answer(void);
 void ui_status_set_cancelled(void);
 void ui_status_set_press_too_short(void);
+void ui_status_set_no_speech(const char *hint);
 void ui_status_set_link(bool connected);
 /* Uhrzeit von der Bruecke: UTC-Sekunden plus Abstand der Ortszeit in Minuten. */
 void ui_status_set_clock(int64_t epoch_utc, int32_t tz_offset_min);

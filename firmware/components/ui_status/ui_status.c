@@ -1154,6 +1154,22 @@ void ui_status_set_press_too_short(void)
 }
 
 /*
+ * Gesendet wurde etwas, gesprochen aber nicht: entweder war die Aufnahme
+ * still, oder die Erkennung hat aus der Stille einen Satz erfunden (der
+ * Server faengt beides ab und schickt diesen Zustand statt einer Antwort).
+ *
+ * Bewusst kein Fehler-Bild: Nichts ist kaputt, der Ausloeser hat nur in der
+ * Tasche gedrueckt. Wer hier ein rotes Kreuz sieht, sucht den Fehler in der
+ * Einrichtung -- und findet keinen.
+ */
+void ui_status_set_no_speech(const char *hint)
+{
+    ESP_LOGI(TAG, "nichts gehoert");
+    set_scene(UI_STATUS_ICON_IDLE, "Nichts gehört",
+              (hint && hint[0]) ? hint : "Halten und sprechen", UI_TEXT_HINT);
+}
+
+/*
  * Der echte Verbindungszustand zur Bruecke. Faerbt nur den Punkt in der
  * Kopfzeile — die Szene bleibt, wie sie ist.
  */
