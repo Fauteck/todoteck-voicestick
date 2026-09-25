@@ -18,11 +18,8 @@ the `ui_state` control event. The macOS, Windows and Linux apps in `desktop/` ar
 upstream code and untouched by this fork — see
 [Upstream Desktop Apps](#upstream-desktop-apps).
 
-> **Hardware status (as of 2026-08-26):** the fork changes below are written and
-> build in CI, but the first run on a real StickS3 is still open — the device
-> still runs the factory firmware, and there is no ESP-IDF environment where the
-> changes were authored. This line is a point in time, not a property of the
-> repo; the live state lives in the `Todoteck: Audio Gerät` task, not here.
+> **Status** — what is merged, built and flashed onto which device — is not kept
+> in this README. It lives in git and in Todoteck (project *Home Lab*).
 
 ## What This Fork Changes
 
