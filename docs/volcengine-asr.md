@@ -1,3 +1,4 @@
+<!-- heimat: repo — ändert sich mit: desktop/windows/src/asr_protocol.cc, desktop/macos/Sources/VoiceStickApp/ASRWebSocketClient.swift -->
 # Volcengine ASR Notes
 
 This note keeps only the Volcengine ASR details that matter to Voice Stick.
