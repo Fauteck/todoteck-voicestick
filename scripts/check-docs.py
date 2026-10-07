@@ -225,9 +225,60 @@ def check_dependencies() -> None:
             sorted(doc), sorted(code))
 
 
+# --- Heimat-Regel: CLAUDE.md und Marken in docs/ ---------------------------
+#
+# Jede Datei in docs/ sagt in ihrer ersten Zeile, warum sie im Repo liegt: mit
+# welchem Code sie sich aendert -- oder bis wann ein Konzept in Arbeit ist.
+# Was keine solche Bindung hat, ist eine Wiki-Seite (llm-wiki in Todoteck).
+
+CLAUDE_MD = ROOT / "CLAUDE.md"
+HEIMAT_MARKE = re.compile(
+    r"<!--\s*heimat:\s*repo\s*[—–-]+\s*(ändert sich mit|aendert sich mit|in Arbeit bis):\s*(.+?)\s*-->"
+)
+WIKI_HINWEIS = ("Konzepte, Entscheidungen und Zeitpunkt-Dokumente gehoeren ins Wiki "
+                "`llm-wiki` (Todoteck), nicht nach docs/.")
+
+
+def check_heimat() -> None:
+    import datetime
+
+    if not re.search(r"<!--\s*heimat-regel v\d+\s*-->.*?<!--\s*/heimat-regel\s*-->",
+                     CLAUDE_MD.read_text(encoding="utf-8"), re.S):
+        failures.append(f"CLAUDE.md [heimat]: Block <!-- heimat-regel vN --> ... "
+                        f"<!-- /heimat-regel --> fehlt. {WIKI_HINWEIS}")
+
+    heute = datetime.date.today().isoformat()
+    for doc in sorted((ROOT / "docs").rglob("*.md")):
+        if doc.name == "README.md":
+            continue
+        rel = doc.relative_to(ROOT)
+        erste = next((z for z in doc.read_text(encoding="utf-8").splitlines() if z.strip()), "")
+        treffer = HEIMAT_MARKE.search(erste)
+        if not treffer:
+            failures.append(f"{rel} [heimat]: erste Zeile traegt keine Heimat-Marke "
+                            f"<!-- heimat: repo — ändert sich mit: ... -->. {WIKI_HINWEIS}")
+            continue
+        art, wert = treffer.groups()
+        if art == "in Arbeit bis":
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", wert):
+                failures.append(f"{rel} [heimat]: „in Arbeit bis“ braucht ein Datum JJJJ-MM-TT, "
+                                f"steht: {wert}. {WIKI_HINWEIS}")
+            elif wert < heute:
+                failures.append(f"{rel} [heimat]: „in Arbeit bis {wert}“ ist vorbei -- das "
+                                f"Konzept zieht ins Wiki um. {WIKI_HINWEIS}")
+            continue
+        for pfad in (p.strip().rstrip("/") for p in wert.split(",")):
+            if not pfad:
+                continue
+            trifft = any(ROOT.glob(pfad)) if any(c in pfad for c in "*?[") else (ROOT / pfad).exists()
+            if not trifft:
+                failures.append(f"{rel} [heimat]: „ändert sich mit“ nennt {pfad}, das trifft "
+                                f"nichts im Repo. {WIKI_HINWEIS}")
+
+
 def main() -> int:
     checks = (check_gatt, check_device_info, check_button_roles, check_font_steps,
-              check_dependencies)
+              check_dependencies, check_heimat)
     for check in checks:
         try:
             check()

@@ -1,3 +1,4 @@
+<!-- heimat: repo — ändert sich mit: .github/workflows/release.yml, .github/workflows/firmware.yml, firmware/version.txt -->
 # VoiceStick Release Process
 
 > **This is upstream's process, and no part of it is used in this fork.** It is

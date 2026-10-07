@@ -315,7 +315,7 @@ used by this fork. It is described in `docs/release.md`.
 - The bridge connects to the stick over BLE, wraps the Opus frames into Ogg Opus and posts one turn to `POST /api/voice/turn` with a device token.
 - The answer comes back as plain text and is sent to the stick as `ui_state` with `state: "ready"` and the text in `text` — that is what triggers the answer screen and the done tone.
 - Since the firmware renders umlauts, bridges send the full text from the JSON `text` field rather than the ASCII short form from the `X-Todoteck-Text` header. That header was a workaround for firmware that could not display umlauts and stays in place for other clients.
-- Concept, phases and the server side: `docs/sprach-eingabegeraet-konzept.md` in the Todoteck repository.
+- Concept, phases and the server side: Wiki „Sprach-Eingabegerät (M5StickS3) als vierter Eingabekanal“ (Todoteck project `llm-wiki`).
 
 ## License
 

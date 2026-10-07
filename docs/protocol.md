@@ -1,3 +1,4 @@
+<!-- heimat: repo — ändert sich mit: firmware/components/voice_ble/voice_ble.c, firmware/main/main.c, firmware/components/stick_s3_board/include/stick_s3_board.h -->
 # Voice Stick Protocol
 
 This document describes the protocol implemented by the firmware. It has two
