@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "lvgl.h"
+#include "sdkconfig.h"
 
 typedef enum {
     UI_STATUS_ICON_BOOT,
@@ -22,8 +23,17 @@ typedef enum {
  * der Schirm der Uhrzeit, und ein Maskottchen in Originalgroesse waere
  * daneben ein Mitbewerber statt einer Randnotiz.
  */
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Die Uhr: 150 px mittig ueber dem Text, 64 px auf dem Ziffernblatt. Die
+ * Geometrie faellt wie beim StickS3 vollstaendig aus der Flaeche.
+ */
+#define UI_TECKI_BOX 150
+#define UI_TECKI_BOX_SMALL 64
+#else
 #define UI_TECKI_BOX 64
 #define UI_TECKI_BOX_SMALL 28
+#endif
 
 /*
  * Tecki besteht aus Grundformen, nicht aus einem Bild: eine Linie mit zwei

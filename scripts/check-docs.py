@@ -31,6 +31,7 @@ VOICE_BLE_C = ROOT / "firmware/components/voice_ble/voice_ble.c"
 MAIN_C = ROOT / "firmware/main/main.c"
 UI_STATUS_C = ROOT / "firmware/components/ui_status/ui_status.c"
 BOARD_H = ROOT / "firmware/components/stick_s3_board/include/stick_s3_board.h"
+VOICE_BOARD_H = ROOT / "firmware/components/voice_board/include/voice_board.h"
 VERSION_TXT = ROOT / "firmware/version.txt"
 README = ROOT / "README.md"
 PROTOCOL = ROOT / "docs/protocol.md"
@@ -125,7 +126,19 @@ def check_device_info() -> None:
     if not body:
         fail("device-info", PROTOCOL, "voice_ble_send_device_info() nicht gefunden")
         return
-    json_code = c_strings(body.group(1))
+    # Die Geraetekennung kommt seit der Waveshare-Uhr aus voice_board.h. Das
+    # Beispiel im Protokoll zeigt den StickS3; jede weitere Kennung muss im
+    # Protokoll wenigstens genannt sein, sonst weiss keine Bruecke von ihr.
+    kennungen = hardware_ids()
+    if "stick_s3" not in kennungen:
+        fail("device-info", PROTOCOL, "VOICE_BOARD_HARDWARE_ID fuer den StickS3 nicht lesbar")
+        return
+    json_code = c_strings(body.group(1).replace(
+        "VOICE_BOARD_HARDWARE_ID", '"' + kennungen["stick_s3"] + '"'))
+    protokoll = PROTOCOL.read_text(encoding="utf-8")
+    for geraet, kennung in kennungen.items():
+        if f"`{kennung}`" not in protokoll and f'"{kennung}"' not in protokoll:
+            fail("device-info", PROTOCOL, f"Geraetekennung `{kennung}` ({geraet}) nicht erwaehnt")
 
     doc = region(PROTOCOL, "device-info")
 
@@ -157,6 +170,13 @@ def check_device_info() -> None:
             f"firmware/main/main.c [device-info]: device_info kuendigt `ui_state`-Zustaende an, "
             f"die main.c nicht annimmt: {fehlend}"
         )
+
+
+def hardware_ids() -> dict[str, str]:
+    """{'stick_s3': 'stick_s3', 'watch_206': 'watch_206'} aus voice_board.h."""
+    werte = re.findall(r'#define\s+VOICE_BOARD_HARDWARE_ID\s+"([^"]+)"',
+                       VOICE_BOARD_H.read_text(encoding="utf-8"))
+    return {w: w for w in werte}
 
 
 # --- Tastenrollen: docs/protocol.md gegen stick_s3_board.h ------------------
@@ -194,6 +214,36 @@ def check_button_roles() -> None:
             doc[treffer.group(1)] = (treffer.group(2), treffer.group(3))
 
     compare("tasten-rollen", PROTOCOL, "Tastenrollen", doc, code)
+
+
+# --- Tastenrollen der Uhr: docs/protocol.md gegen voice_board.h ------------
+
+def check_button_roles_watch() -> None:
+    """Dieselbe Frage fuer die Waveshare-Uhr -- dort mit dem Pegel dazu.
+
+    Die Blaettertaste der Uhr ist aktiv high (PWR ueber einen Transistor), die
+    Sprechtaste aktiv low. Wer die Rollen tauscht, tauscht auch die Pegel --
+    und genau das soll die Tabelle nicht verschlafen.
+    """
+    source = VOICE_BOARD_H.read_text(encoding="utf-8")
+    uhr = source.split("#else /* StickS3 */")[0]
+    pins = dict(re.findall(r"#define\s+VOICE_BOARD_PIN_BUTTON_(TALK|BROWSE)\s+GPIO_NUM_(\d+)", uhr))
+    pegel = dict(re.findall(r"#define\s+VOICE_BOARD_BUTTON_(TALK|BROWSE)_ACTIVE_LEVEL\s+(\d)", uhr))
+    if len(pins) != 2 or len(pegel) != 2:
+        fail("tasten-rollen-uhr", PROTOCOL, "Tastenbelegung der Uhr in voice_board.h nicht lesbar")
+        return
+    wort = {"0": "low", "1": "high"}
+    code = {
+        "primary": (pins["TALK"], wort[pegel["TALK"]]),
+        "secondary": (pins["BROWSE"], wort[pegel["BROWSE"]]),
+    }
+    doc = {}
+    for zeile in region(PROTOCOL, "tasten-rollen-uhr").splitlines():
+        treffer = re.match(r"\|\s*`(primary|secondary)`\s*\|[^|]*\|\s*(\d+)\s*\|\s*(low|high)\s*\|",
+                           zeile.strip())
+        if treffer:
+            doc[treffer.group(1)] = (treffer.group(2), treffer.group(3))
+    compare("tasten-rollen-uhr", PROTOCOL, "Tastenrollen der Uhr", doc, code)
 
 
 # --- Schriftstufen: README gegen ui_status.c -------------------------------
@@ -277,7 +327,8 @@ def check_heimat() -> None:
 
 
 def main() -> int:
-    checks = (check_gatt, check_device_info, check_button_roles, check_font_steps,
+    checks = (check_gatt, check_device_info, check_button_roles, check_button_roles_watch,
+              check_font_steps,
               check_dependencies, check_heimat)
     for check in checks:
         try:

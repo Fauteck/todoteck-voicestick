@@ -1,0 +1,13 @@
+# Waveshare ESP32-S3-Touch-AMOLED-2.06 -- Ergaenzung zu sdkconfig.defaults.
+#
+# Alles andere (8 MB Flash, Octal-PSRAM, OTA-Partitionen, Bluetooth) gilt fuer
+# beide Geraete gleich. Die Uhr hat 32 MB Flash; genutzt werden vorerst
+# dieselben 8 MB wie beim StickS3, damit Partitionstabelle und OTA-Weg
+# identisch bleiben.
+CONFIG_VOICE_BOARD_WATCH206=y
+
+# LVGL holt Speicher ueber malloc statt aus seinem festen 64-KB-Topf. Die
+# Figur ist hier 150 statt 64 Pixel gross, und was LVGL dafuer an
+# Zwischenflaechen braucht, soll in den 8 MB PSRAM landen koennen, statt am
+# Topf zu scheitern.
+CONFIG_LV_USE_CLIB_MALLOC=y

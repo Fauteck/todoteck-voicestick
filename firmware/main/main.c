@@ -22,7 +22,7 @@
 
 #include "audio_pipeline.h"
 #include "audio_tone.h"
-#include "stick_s3_board.h"
+#include "voice_board.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
@@ -175,7 +175,8 @@ static const char *app_ui_state_name(app_ui_state_t state)
 /*
  * Die Tasten heissen nach ihrer Rolle, nicht nach ihrer Lage: `TALK` ist die
  * Sprechtaste, `BROWSE` die zum Blaettern. Welcher Pin daran haengt, steht in
- * stick_s3_board.h -- und hat 08/2026 gewechselt.
+ * stick_s3_board.h (StickS3, hat 08/2026 gewechselt) beziehungsweise in
+ * voice_board.h (Waveshare-Uhr).
  */
 typedef enum {
     APP_EVENT_TALK_DOWN,
@@ -387,15 +388,14 @@ static void stop_host_response_timer(void)
     }
 }
 
-/* Liegt eine der Weck-Tasten gerade unten? Aktiv ist low. */
-static bool any_wake_gpio_low(const gpio_num_t *gpios, size_t count)
+/*
+ * Liegt eine der Weck-Tasten gerade gedrueckt? Beim StickS3 heisst das "low"
+ * auf beiden Pins; bei der Uhr ist die Blaettertaste aktiv high (siehe
+ * voice_board.h). Die Board-Schicht kennt den Pegel, hier wird nur gefragt.
+ */
+static bool any_wake_button_pressed(void)
 {
-    for (size_t i = 0; i < count; i++) {
-        if (gpio_get_level(gpios[i]) == 0) {
-            return true;
-        }
-    }
-    return false;
+    return voice_board_talk_button_pressed() || voice_board_browse_button_pressed();
 }
 
 static void enter_deep_sleep(void)
@@ -413,9 +413,9 @@ static void enter_deep_sleep(void)
 
     bool charging = false;
     bool usb_powered = false;
-    esp_err_t power_err = stick_s3_board_battery_charging(&charging);
+    esp_err_t power_err = voice_board_battery_charging(&charging);
     if (power_err == ESP_OK) {
-        power_err = stick_s3_board_usb_powered(&usb_powered);
+        power_err = voice_board_usb_powered(&usb_powered);
     }
     if (power_err == ESP_OK && (charging || usb_powered)) {
         s_battery_charging = charging;
@@ -436,9 +436,7 @@ static void enter_deep_sleep(void)
      * eine Taste, die nichts tut, und haelt das Geraet fuer defekt. ext1
      * nimmt ohnehin eine Maske, zwei Pins kosten also nichts.
      */
-    const uint64_t wake_mask = (1ULL << STICK_S3_PIN_BUTTON_TALK) |
-                               (1ULL << STICK_S3_PIN_BUTTON_BROWSE);
-    const gpio_num_t wake_gpios[] = { STICK_S3_PIN_BUTTON_TALK, STICK_S3_PIN_BUTTON_BROWSE };
+    const gpio_num_t wake_gpios[] = { VOICE_BOARD_PIN_BUTTON_TALK, VOICE_BOARD_PIN_BUTTON_BROWSE };
     const size_t wake_gpio_count = sizeof(wake_gpios) / sizeof(wake_gpios[0]);
 
     for (size_t i = 0; i < wake_gpio_count; i++) {
@@ -447,14 +445,14 @@ static void enter_deep_sleep(void)
             restart_deep_sleep_timer();
             return;
         }
-        if (gpio_get_level(wake_gpios[i]) == 0) {
-            ESP_LOGI(TAG, "skip deep sleep: GPIO%d is pressed", wake_gpios[i]);
-            restart_deep_sleep_timer();
-            return;
-        }
+    }
+    if (any_wake_button_pressed()) {
+        ESP_LOGI(TAG, "skip deep sleep: a wake button is pressed");
+        restart_deep_sleep_timer();
+        return;
     }
 
-    ESP_LOGI(TAG, "entering deep sleep, wake on GPIO%d/GPIO%d low",
+    ESP_LOGI(TAG, "entering deep sleep, wake on GPIO%d/GPIO%d",
              wake_gpios[0], wake_gpios[1]);
     release_recording_pm_locks();
     ESP_ERROR_CHECK_WITHOUT_ABORT(ui_status_set_brightness(0));
@@ -463,7 +461,7 @@ static void enter_deep_sleep(void)
        Abdunkeln tot zu sein. */
     wrist_wake_prepare_deep_sleep();
     ui_status_prepare_deep_sleep();
-    stick_s3_board_prepare_deep_sleep();
+    voice_board_prepare_deep_sleep();
 
     /* Clear any stale wakeup source bits left over from light sleep / esp_pm
        configuration (e.g. gpio_wakeup_enable on the PMIC IRQ line). Without
@@ -474,12 +472,36 @@ static void enter_deep_sleep(void)
        remains effective in deep sleep; combined with the explicit RTC pull-up
        below this prevents GPIO%d from floating low and self-waking. */
     (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+#if CONFIG_VOICE_BOARD_WATCH206
+    /*
+     * Die Uhr weckt mit zwei Pegeln: Sprechen (BOOT, GPIO0) zieht nach unten,
+     * Blaettern (PWR ueber den BSS138, GPIO10) nach oben. ext1 nimmt auf dem
+     * S3 nur einen Pegel fuer alle Pins, also traegt ext0 den zweiten.
+     *
+     * Interne Widerstaende bleiben aus: Beide Pins haben 10 kOhm auf der
+     * Platine. Ein interner Pull-up an GPIO10 zoege im Schlaf dauerhaft gegen
+     * den durchgeschalteten Transistor -- Strom fuer nichts.
+     */
+    for (size_t i = 0; i < wake_gpio_count; i++) {
+        (void)rtc_gpio_pulldown_dis(wake_gpios[i]);
+        (void)rtc_gpio_pullup_dis(wake_gpios[i]);
+    }
+    esp_err_t err = esp_sleep_enable_ext0_wakeup(VOICE_BOARD_PIN_BUTTON_BROWSE,
+                                                 VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL);
+    if (err == ESP_OK) {
+        err = esp_sleep_enable_ext1_wakeup_io(1ULL << VOICE_BOARD_PIN_BUTTON_TALK,
+                                              ESP_EXT1_WAKEUP_ANY_LOW);
+    }
+#else
+    const uint64_t wake_mask = (1ULL << VOICE_BOARD_PIN_BUTTON_TALK) |
+                               (1ULL << VOICE_BOARD_PIN_BUTTON_BROWSE);
     for (size_t i = 0; i < wake_gpio_count; i++) {
         (void)rtc_gpio_pulldown_dis(wake_gpios[i]);
         (void)rtc_gpio_pullup_en(wake_gpios[i]);
     }
 
     esp_err_t err = esp_sleep_enable_ext1_wakeup_io(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW);
+#endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "enable deep sleep wake failed: %s", esp_err_to_name(err));
         restart_deep_sleep_timer();
@@ -490,11 +512,11 @@ static void enter_deep_sleep(void)
        capacitance, etc.). If it stays low we would just wake up immediately
        after esp_deep_sleep_start(), so abort and retry later. */
     int wait_ms = 0;
-    while (any_wake_gpio_low(wake_gpios, wake_gpio_count) && wait_ms < 200) {
+    while (any_wake_button_pressed() && wait_ms < 200) {
         vTaskDelay(pdMS_TO_TICKS(10));
         wait_ms += 10;
     }
-    if (any_wake_gpio_low(wake_gpios, wake_gpio_count)) {
+    if (any_wake_button_pressed()) {
         ESP_LOGW(TAG, "wake pin still low after %d ms, abort deep sleep", wait_ms);
         restart_deep_sleep_timer();
         return;
@@ -598,6 +620,13 @@ static uint32_t start_recording(void)
         return 0;
     }
 
+    /*
+     * Ein kurzer Stoss am Handgelenk, zusaetzlich zum Ton: Draussen oder mit
+     * Kopfhoerern hoert man den Piep nicht, spuert den Motor aber. Beim
+     * StickS3 tut das nichts -- er hat keinen.
+     */
+    voice_board_haptic(60);
+
     s_recording = true;
     s_app_ui_state = APP_UI_STATE_RECORDING;
     s_recording_started_us = esp_timer_get_time();
@@ -677,6 +706,7 @@ static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, ui
     }
 }
 
+#if !CONFIG_VOICE_BOARD_WATCH206 /* nur die PMIC-Leitung des StickS3 ruft aus einer ISR */
 static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_task_woken)
 {
     if (s_app_event_queue) {
@@ -688,6 +718,7 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
         (void)xQueueSendFromISR(s_app_event_queue, &event, high_task_woken);
     }
 }
+#endif
 
 static void queue_ui_state_event(const char *state, const char *text, const char *question)
 {
@@ -753,9 +784,9 @@ static void wrist_raise_cb(void)
 #endif
 
 /*
- * Die Uhrzeit kommt von der Bruecke — das Geraet hat weder RTC-Baustein noch
+ * Die Uhrzeit kommt von der Bruecke — der StickS3 hat weder RTC-Baustein noch
  * WLAN, und eine geratene Uhrzeit auf dem Handgelenk waere schlimmer als
- * keine. Ueber die Warteschlange wie alles andere, damit die Anzeige aus
+ * keine. (Die Waveshare-Uhr hat einen; die Bruecke stellt ihn mit.) Ueber die Warteschlange wie alles andere, damit die Anzeige aus
  * einem Strang bedient wird.
  */
 static void queue_time_event(int64_t epoch, int32_t tz_offset_min)
@@ -800,6 +831,19 @@ static void browse_button_up_cb(void *button_handle, void *usr_data)
     (void)usr_data;
     queue_app_event(APP_EVENT_BROWSE_UP);
 }
+
+/*
+ * Antippen des Schirms (nur die Uhr): dasselbe wie die Blaettertaste. Phase 1
+ * kennt auf dem Touch genau eine Geste; Wischen und Schaltflaechen kommen,
+ * wenn die Bruecke etwas zum Bestaetigen schickt, das mehr als zwei Knoepfe
+ * braucht.
+ */
+#if CONFIG_VOICE_BOARD_WATCH206
+static void screen_tap_cb(void)
+{
+    queue_app_event(APP_EVENT_BROWSE_UP);
+}
+#endif
 
 static void ble_connection_cb(bool connected)
 {
@@ -1133,7 +1177,7 @@ static void app_event_task(void *arg)
                                                     : voice_ble_device_name());
             break;
         case APP_EVENT_POWER_IRQ:
-            gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
+            gpio_intr_enable(VOICE_BOARD_PIN_PMIC_IRQ);
             /* fall through */
         case APP_EVENT_BATTERY_REFRESH:
             update_battery_status();
@@ -1191,6 +1235,17 @@ static void app_event_task(void *arg)
             ui_status_set_clock(event.epoch, event.tz_offset_min);
             ESP_LOGI(TAG, "Uhr gestellt: %lld UTC, Ortszeit %+d min",
                      (long long)event.epoch, (int)event.tz_offset_min);
+            /*
+             * Hat das Geraet einen Uhrbaustein, bekommt er die Zeit mit --
+             * dann steht sie nach einem Neustart, bevor die Bruecke sich
+             * meldet. Ohne Baustein (StickS3) ist das ESP_ERR_NOT_SUPPORTED.
+             */
+            {
+                esp_err_t rtc_err = voice_board_rtc_write(event.epoch, event.tz_offset_min);
+                if (rtc_err != ESP_OK && rtc_err != ESP_ERR_NOT_SUPPORTED) {
+                    ESP_LOGW(TAG, "Uhrbaustein nicht gestellt: %s", esp_err_to_name(rtc_err));
+                }
+            }
             break;
         case APP_EVENT_DEVICE_NAME:
             if (event.text[0]) {
@@ -1211,7 +1266,7 @@ static void app_event_task(void *arg)
                  * des Pins wuerde sonst mitten im Satz abschneiden. 400 ms
                  * merkt beim Loslassen niemand, ein Fehlschnitt sehr wohl.
                  */
-                if (stick_s3_talk_button_pressed()) {
+                if (voice_board_talk_button_pressed()) {
                     s_release_ticks = 0;
                     s_primary_release_us = 0;
                 } else {
@@ -1276,12 +1331,13 @@ static void app_event_task(void *arg)
     }
 }
 
-static esp_err_t init_gpio_button(gpio_num_t gpio_num, button_handle_t *button)
+static esp_err_t init_gpio_button(gpio_num_t gpio_num, uint8_t active_level,
+                                  button_handle_t *button)
 {
     const button_config_t button_config = {0};
     const button_gpio_config_t gpio_config = {
         .gpio_num = gpio_num,
-        .active_level = 0,
+        .active_level = active_level,
         .enable_power_save = true
     };
 
@@ -1295,11 +1351,13 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_TALK, &s_talk_button);
+    esp_err_t err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_TALK,
+                                     VOICE_BOARD_BUTTON_TALK_ACTIVE_LEVEL, &s_talk_button);
     if (err != ESP_OK) {
         return err;
     }
-    err = init_gpio_button(STICK_S3_PIN_BUTTON_BROWSE, &s_browse_button);
+    err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_BROWSE,
+                           VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL, &s_browse_button);
     if (err != ESP_OK) {
         return err;
     }
@@ -1425,10 +1483,11 @@ static esp_err_t init_battery_refresh_timer(void)
     return esp_timer_start_periodic(s_battery_refresh_timer, BATTERY_REFRESH_FALLBACK_US);
 }
 
+#if !CONFIG_VOICE_BOARD_WATCH206
 static void IRAM_ATTR pmic_irq_isr(void *arg)
 {
     (void)arg;
-    gpio_intr_disable(STICK_S3_PIN_PMIC_IRQ);
+    gpio_intr_disable(VOICE_BOARD_PIN_PMIC_IRQ);
 
     BaseType_t high_task_woken = pdFALSE;
     queue_app_event_from_isr(APP_EVENT_POWER_IRQ, &high_task_woken);
@@ -1440,7 +1499,7 @@ static void IRAM_ATTR pmic_irq_isr(void *arg)
 static esp_err_t init_pmic_irq(void)
 {
     gpio_config_t irq_config = {
-        .pin_bit_mask = 1ULL << STICK_S3_PIN_PMIC_IRQ,
+        .pin_bit_mask = 1ULL << VOICE_BOARD_PIN_PMIC_IRQ,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -1451,7 +1510,7 @@ static esp_err_t init_pmic_irq(void)
         return err;
     }
 
-    err = gpio_wakeup_enable(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
+    err = gpio_wakeup_enable(VOICE_BOARD_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
     if (err != ESP_OK) {
         return err;
     }
@@ -1461,27 +1520,39 @@ static esp_err_t init_pmic_irq(void)
         return err;
     }
 
-    err = gpio_isr_handler_add(STICK_S3_PIN_PMIC_IRQ, pmic_irq_isr, NULL);
+    err = gpio_isr_handler_add(VOICE_BOARD_PIN_PMIC_IRQ, pmic_irq_isr, NULL);
     if (err != ESP_OK) {
         return err;
     }
 
-    err = gpio_set_intr_type(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
+    err = gpio_set_intr_type(VOICE_BOARD_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
     if (err != ESP_OK) {
         return err;
     }
-    err = gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
+    err = gpio_intr_enable(VOICE_BOARD_PIN_PMIC_IRQ);
     if (err != ESP_OK) {
         return err;
     }
 
     return ESP_OK;
 }
+#else
+/*
+ * Die Uhr hat keine Leitung vom AXP2101 zum Chip (VOICE_BOARD_PIN_PMIC_IRQ
+ * ist NC). Netzteil ein/aus merkt sie deshalb am Akku-Zeitgeber, spaetestens
+ * nach BATTERY_REFRESH_FALLBACK_MS -- fuer "nicht schlafen, solange er laedt"
+ * reicht das.
+ */
+static esp_err_t init_pmic_irq(void)
+{
+    return ESP_OK;
+}
+#endif
 
 static void update_battery_status(void)
 {
     uint8_t sys_status = 0;
-    esp_err_t irq_err = stick_s3_board_clear_power_irqs(&sys_status);
+    esp_err_t irq_err = voice_board_clear_power_irqs(&sys_status);
     if (irq_err == ESP_OK && sys_status) {
         ESP_LOGI(TAG, "PMIC sys irq=0x%02x", sys_status);
     }
@@ -1489,12 +1560,12 @@ static void update_battery_status(void)
     int level = 0;
     bool charging = false;
     bool usb_powered = false;
-    esp_err_t err = stick_s3_board_battery_level(&level);
+    esp_err_t err = voice_board_battery_level(&level);
     if (err == ESP_OK) {
-        err = stick_s3_board_battery_charging(&charging);
+        err = voice_board_battery_charging(&charging);
     }
     if (err == ESP_OK) {
-        err = stick_s3_board_usb_powered(&usb_powered);
+        err = voice_board_usb_powered(&usb_powered);
     }
     if (err == ESP_OK) {
         const bool external_power_changed = (charging != s_battery_charging) ||
@@ -1519,7 +1590,7 @@ void app_main(void)
              (unsigned long long)esp_sleep_get_ext1_wakeup_status());
 
     ESP_ERROR_CHECK(init_power_management());
-    ESP_ERROR_CHECK(stick_s3_board_init());
+    ESP_ERROR_CHECK(voice_board_init());
     ESP_ERROR_CHECK(ui_status_init());
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());
@@ -1533,12 +1604,36 @@ void app_main(void)
     if (s_clock_valid) {
         /* Aus dem Tiefschlaf zurueck: Zeit lief weiter, der Abstand kommt aus dem RTC-Speicher. */
         ui_status_restore_clock(s_clock_offset_min);
+    } else {
+        /*
+         * Kaltstart. Mit Uhrbaustein (Waveshare-Uhr) steht die Zeit trotzdem
+         * -- er laeuft am Akku weiter. ui_status_set_clock() stellt dabei
+         * auch die Systemzeit, genau wie beim `time`-Ereignis der Bruecke.
+         */
+        int64_t rtc_epoch = 0;
+        int32_t rtc_offset_min = 0;
+        if (voice_board_rtc_read(&rtc_epoch, &rtc_offset_min) == ESP_OK) {
+            s_clock_offset_min = rtc_offset_min;
+            s_clock_valid = true;
+            ui_status_set_clock(rtc_epoch, rtc_offset_min);
+            ESP_LOGI(TAG, "Uhr aus dem Uhrbaustein: %lld UTC, Ortszeit %+d min",
+                     (long long)rtc_epoch, (int)rtc_offset_min);
+        }
     }
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);
     voice_ble_set_ota_callback(ble_ota_cb);
     ESP_ERROR_CHECK(init_buttons());
+#if CONFIG_VOICE_BOARD_WATCH206
+    {
+        /* Ohne Touch bleiben beide Tasten -- kein Grund, nicht zu starten. */
+        esp_err_t touch_err = voice_board_touch_init(screen_tap_cb);
+        if (touch_err != ESP_OK) {
+            ESP_LOGW(TAG, "Touch nicht bereit: %s", esp_err_to_name(touch_err));
+        }
+    }
+#endif
 
     esp_err_t err = voice_ble_init();
     if (err != ESP_OK) {

@@ -91,7 +91,8 @@ upstream tooling, and deleting them would only add conflicts the next time
 
 ## Project Layout
 
-- `firmware/`: ESP-IDF firmware for M5Stack StickS3 / ESP32-S3.
+- `firmware/`: ESP-IDF firmware for M5Stack StickS3 and the Waveshare ESP32-S3-Touch-AMOLED-2.06 (one source tree, two build targets).
+- `firmware/components/voice_board/`: board layer — one header for both devices, the watch driver (AXP2101, PCF85063, FT3168, motor). The StickS3 calls pass through to the untouched `stick_s3_board`.
 - `firmware/components/ui_status/`: display, fonts, level and time bars, link dot.
 - `firmware/components/audio_tone/`: acknowledgement tones over the ES8311.
 - `desktop/macos/`: Swift Package for the native macOS menu bar app (upstream).
@@ -153,6 +154,42 @@ while the capture path is up. That is why the start tone is played *before*
 
 Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s3_board.h`.
 
+## Second Target: Waveshare ESP32-S3-Touch-AMOLED-2.06
+
+The same firmware also builds for the Waveshare watch board
+(`-DVOICE_BOARD=watch206`). Protocol, bridge, history, clock face and Tecki are
+shared; pins, drivers and layout come from the board layer. Pins and addresses
+are taken from Waveshare's schematic (V1.0) and board package
+(`waveshare/esp32_s3_touch_amoled_2_06` 2.0.0), **not yet verified on the
+device** — the first flash is the test.
+
+| | StickS3 | Waveshare watch |
+| --- | --- | --- |
+| Display | ST7789 240 x 135 LCD, landscape | CO5300 410 x 502 AMOLED over QSPI, portrait; black ground in every scene (AMOLED) |
+| Layout | Tecki beside the text | Tecki above the text, same "does it fit?" rule; own Latin-1 fonts 18–30 px, clock face 120 px |
+| Talk (`primary`) | side button, GPIO12 | BOOT, GPIO0 (active low) |
+| Browse (`secondary`) | front button, GPIO11 | PWR via AXP2101/transistor, GPIO10 (active high); a tap on the screen does the same |
+| Microphone | ES8311 | ES7210 (two mics, mic 1 used), ES8311 drives the speaker only, amplifier on GPIO46 |
+| Clock | from the bridge only | PCF85063 keeps time through reboots; the bridge's `time` event sets it |
+| Haptics | — | 60 ms motor pulse on record start (GPIO18; only if a motor is fitted) |
+| PMIC | M5PM1 with IRQ line | AXP2101, polled — its IRQ line does not reach the chip |
+| Deep-sleep wake | both buttons, ext1 low | BOOT via ext1 low, PWR via ext0 high |
+
+Why talk sits on BOOT: the AXP2101 powers the board off when PWRON is held for
+several seconds; a recording may last thirty. Holding PWR therefore stays the
+hard-off escape hatch.
+
+Each image carries its device in the project name (`voice_stick` /
+`voice_watch`). BLE OTA rejects an image built for the other device
+(`wrong_device`) instead of booting it with the wrong pins, and `device_info`
+reports `hardware` as `stick_s3` or `watch_206`, so a bridge can pick the right
+file.
+
+Not in this first port: Wi-Fi, the second microphone, the IMU (QMI8658, its
+interrupt is on GPIO21 and could wake from deep sleep), swipe gestures, the SD
+card and the 32 MB flash (the partition table stays at 8 MB, identical to the
+StickS3).
+
 ## Interaction Model
 
 | State | Talk button (side) | Browse button (front) |
@@ -208,6 +245,8 @@ up holding a finished file the device refuses. Two artifacts:
 | --- | --- |
 | `voice_stick.bin` | Plain app image; this is what the Todoteck bridge pushes over BLE OTA |
 | `merged.bin` | Bootloader, partition table and app in one — the USB rescue path when a build breaks the radio link |
+| `voice_watch.bin` | The same for the Waveshare watch |
+| `merged_watch.bin` | The watch's USB image — also the way to put this firmware on a factory-fresh watch |
 
 Rescue flashing needs esptool only, no toolchain:
 
@@ -249,6 +288,21 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
+The Waveshare watch builds into its own directory with its own `sdkconfig`, so
+the two targets never overwrite each other's configuration:
+
+```sh
+idf.py -B build-watch206 -DVOICE_BOARD=watch206 build
+idf.py -B build-watch206 -DVOICE_BOARD=watch206 -p /dev/cu.usbmodemXXXX flash monitor
+```
+
+Before the first flash of a factory-fresh watch, back up Waveshare's demo
+firmware — it is the only way back to it:
+
+```sh
+python -m esptool --chip esp32s3 read_flash 0x0 0x2000000 waveshare-factory.bin
+```
+
 If `export.sh` reports that the ESP-IDF Python virtual environment is missing, run the matching installer once:
 
 ```sh
@@ -273,6 +327,7 @@ Firmware dependencies are declared through the ESP-IDF component manager:
 - `espressif/bmi270`
 - `espressif/button`
 - `espressif/esp_codec_dev`
+- `espressif/esp_lcd_sh8601`
 - `78/esp-opus`
 - `lvgl/lvgl`
 <!-- /doku-vertrag -->

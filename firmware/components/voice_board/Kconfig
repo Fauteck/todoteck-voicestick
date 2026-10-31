@@ -1,0 +1,18 @@
+menu "Voice Stick: Zielgeraet"
+
+    # Gesetzt wird das nicht von Hand, sondern ueber den Bau-Schalter
+    # `-DVOICE_BOARD=watch206` (firmware/CMakeLists.txt): Der waehlt die
+    # passende sdkconfig.defaults-Datei, einen eigenen sdkconfig-Pfad und den
+    # Projektnamen, an dem der OTA-Schutz ein fremdes Abbild erkennt.
+    choice VOICE_BOARD
+        prompt "Zielgeraet"
+        default VOICE_BOARD_STICKS3
+
+        config VOICE_BOARD_STICKS3
+            bool "M5Stack StickS3"
+
+        config VOICE_BOARD_WATCH206
+            bool "Waveshare ESP32-S3-Touch-AMOLED-2.06"
+    endchoice
+
+endmenu

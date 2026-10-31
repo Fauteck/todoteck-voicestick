@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schreibt `firmware.json` neben die beiden Abbilder.
+"""Schreibt `firmware.json` neben die Abbilder (StickS3 und Waveshare-Uhr).
 
 Aufgerufen aus `.github/workflows/firmware.yml` mit `dist/` als
 Arbeitsverzeichnis. Eigene Datei statt eines Heredocs im Workflow, weil das
@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-FILES = ("voice_stick.bin", "merged.bin")
+FILES = ("voice_stick.bin", "merged.bin", "voice_watch.bin", "merged_watch.bin")
 
 
 def describe(name: str) -> dict[str, object]:
