@@ -37,6 +37,8 @@ typedef enum {
     VOICE_BOARD_SWIPE_RIGHT,
     VOICE_BOARD_SWIPE_UP,
     VOICE_BOARD_SWIPE_DOWN,
+    /* Flache Hand auf dem Schirm: alles still. */
+    VOICE_BOARD_PALM,
 } voice_board_gesture_t;
 
 typedef struct {

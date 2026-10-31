@@ -418,12 +418,16 @@ static void touch_task(void *arg)
         xSemaphoreTake(s_touch_sem, portMAX_DELAY);
         const int64_t down_us = esp_timer_get_time();
         bool seen = false;
+        int max_points = 0;
         int16_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         while (true) {
             int16_t x = 0, y = 0;
             const int points = touch_read(&x, &y);
             if (points <= 0) {
                 break;  /* abgehoben -- oder der Baustein antwortet nicht */
+            }
+            if (points > max_points) {
+                max_points = points;
             }
             if (!seen) {
                 x0 = x;
@@ -435,7 +439,21 @@ static void touch_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(TOUCH_POLL_MS));
         }
         const int64_t up_us = esp_timer_get_time();
-        if (seen && up_us - down_us <= TOUCH_MAX_TAP_MS * 1000LL &&
+        /*
+         * Hand aufs Display: mehrere Finger zugleich (eine flache Hand meldet
+         * der FT3168 als zwei oder mehr Punkte), eine Viertelsekunde lang.
+         * Das gilt auch ueber TOUCH_MAX_TAP_MS hinaus -- wer die Uhr
+         * abdeckt, laesst die Hand meist einen Moment liegen.
+         */
+        if (seen && max_points >= 2 && up_us - down_us >= 250 * 1000LL &&
+            up_us - last_event_us >= TOUCH_DEBOUNCE_US) {
+            last_event_us = up_us;
+            voice_board_touch_event_t ev = { .gesture = VOICE_BOARD_PALM, .x = x0, .y = y0 };
+            ESP_LOGI(TAG, "Touch: Hand aufs Display (%d Punkte)", max_points);
+            if (s_touch_cb) {
+                s_touch_cb(&ev);
+            }
+        } else if (seen && up_us - down_us <= TOUCH_MAX_TAP_MS * 1000LL &&
             up_us - last_event_us >= TOUCH_DEBOUNCE_US) {
             last_event_us = up_us;
             const int dx = x1 - x0;

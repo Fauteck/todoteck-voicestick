@@ -134,7 +134,7 @@ go stale without someone reading them.
 - The screen shows pairing, ready, listening (`Hört zu`), thinking (`Denkt nach`), pending confirmation, error and battery states from host-sent `ui_state` updates. Text arriving with `ready` is rendered as the answer and kept for recall (up to 192 bytes).
 - Text that does not fit below Tecki takes the whole screen and Tecki is hidden for as long as it is shown; the font is the largest size that fits, and anything beyond even the smallest ends in an ellipsis. Characters outside the fonts' Latin-1 range are replaced with ASCII where an equivalent exists and dropped otherwise.
 - The screen dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. Either button wakes it from deep sleep — a button that does nothing while the device sleeps reads as a broken button.
-- BLE OTA updates over the two 3 MB app slots of the OTA partition table.
+- BLE OTA updates over the two 3 MB app slots of the OTA partition table, with rollback: a new image boots on probation and confirms itself once Bluetooth is up; if it crashes before that, the bootloader returns to the previous one (needs one USB flash of `merged*.bin` to install a bootloader with rollback enabled).
 
 Tones share the I2S lines with the microphone: `audio_tone_play()` stays silent
 while the capture path is up. That is why the start tone is played *before*
@@ -195,6 +195,10 @@ Watch-only on top of that:
 | Swipes | Left: one answer older, right: one newer, down: back to the watch face. A tap on a dimmed screen only wakes it |
 | Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
 | Cards: Today, Shopping, Home | Swipe up from the watch face. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md) |
+| Control centre | Swipe down from the top edge: brightness (three steps), silent (vibration only), cinema (no wrist wake, answers don't light the screen), power saving, torch (the whole screen white until the next touch), battery |
+| Power saving | Dimmer, dims after 6 s instead of 15, no wrist gesture. Switches itself on once per charge below 15 % |
+| Palm on the screen | Two or more touch points for a quarter second: a running recording is discarded, overlays close, the screen goes dark |
+| Action button | Hold PWR for 1.5 s: the watch sends `{"event":"action"}`, and the bridge runs the sentence configured for it as a text turn (e.g. "Was steht heute an?") |
 | Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU

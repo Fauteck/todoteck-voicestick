@@ -234,6 +234,9 @@ ignored.
 {"event":"glance_request"}
 ```
 
+`{"event":"action"}` is the watch's action button (PWR held for 1.5 s); the
+bridge decides what it does.
+
 `glance_request` asks the bridge to send face and cards now (the watch sends it
 when the cards are opened by swiping up).
 

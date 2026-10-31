@@ -70,4 +70,6 @@ esp_err_t voice_ble_send_choice(uint8_t index, const char *text);
 esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index);
 /* Bitte an die Bruecke, Zifferblatt und Karten jetzt neu zu schicken. */
 esp_err_t voice_ble_send_glance_request(void);
+/* Aktionstaste der Uhr (PWR lang): was sie tut, legt die Bruecke fest. */
+esp_err_t voice_ble_send_action(void);
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);

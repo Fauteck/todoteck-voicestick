@@ -971,6 +971,11 @@ esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index)
     return send_state_json(json);
 }
 
+esp_err_t voice_ble_send_action(void)
+{
+    return send_state_json("{\"event\":\"action\"}");
+}
+
 esp_err_t voice_ble_send_glance_request(void)
 {
     return send_state_json("{\"event\":\"glance_request\"}");

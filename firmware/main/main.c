@@ -24,7 +24,9 @@
 #include "audio_pipeline.h"
 #include "audio_tone.h"
 #include "voice_board.h"
+#include "esp_ota_ops.h"
 #include "ui_cards.h"
+#include "ui_control.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
@@ -114,6 +116,31 @@ static bool s_usb_powered;
  * (UTC-Sekunden, 0 = keiner) -- und ob fuer ihn schon vibriert wurde. Zehn
  * Minuten vorher meldet sich die Uhr am Handgelenk, einmal je Termin.
  */
+/*
+ * Was im Kontrollzentrum der Uhr steht. Im RTC-Speicher, damit es den
+ * Tiefschlaf ueberlebt; nach einem Neustart gilt wieder die Voreinstellung.
+ *
+ *   brightness  0 = Hell, 1 = Mittel (Voreinstellung), 2 = Dunkel
+ *   silent      keine Toene -- die Vibration bleibt, sie ist leise genug
+ *   cinema      Handgelenk weckt nicht, Antworten wecken den Schirm nicht
+ *   saver       Energiesparen: dunkler, frueher gedimmt, keine Geste.
+ *               Schaltet sich unter SAVER_AUTO_PERCENT von selbst ein.
+ */
+static RTC_DATA_ATTR uint8_t s_brightness_level = 1;
+static RTC_DATA_ATTR bool s_silent;
+static RTC_DATA_ATTR bool s_cinema;
+static RTC_DATA_ATTR bool s_saver;
+/* Einmal je Ladezyklus automatisch -- wer es wieder ausschaltet, bleibt dabei. */
+static RTC_DATA_ATTR bool s_saver_auto_done;
+static int s_battery_percent = -1;
+#define SAVER_AUTO_PERCENT 15
+#if CONFIG_VOICE_BOARD_WATCH206
+static const uint8_t BRIGHTNESS_STEPS[3] = { 255, 128, 48 };
+static const char *const BRIGHTNESS_NAMES[3] = { "Hell", "Mittel", "Dunkel" };
+#endif
+/* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
+static bool s_action_fired;
+
 static volatile int64_t s_next_event_start;
 static volatile bool s_event_reminded;
 #define EVENT_REMINDER_LEAD_S (10 * 60)
@@ -221,6 +248,8 @@ typedef enum {
     APP_EVENT_WRIST_RAISE,
     /* Tippen oder Wischen auf dem Schirm der Uhr. */
     APP_EVENT_TOUCH,
+    /* Langer Druck auf die Blaettertaste der Uhr: die frei belegte Aktion. */
+    APP_EVENT_ACTION,
 } app_event_type_t;
 
 typedef struct {
@@ -407,7 +436,9 @@ static void restart_display_dim_timer(void)
 
     (void)esp_timer_stop(s_display_dim_timer);
     if (!s_recording && !s_ota_updating) {
-        esp_err_t err = esp_timer_start_once(s_display_dim_timer, DISPLAY_DIM_TIMEOUT_US);
+        /* Beim Sparen nach sechs statt fuenfzehn Sekunden. */
+        esp_err_t err = esp_timer_start_once(s_display_dim_timer,
+                                             s_saver ? 6 * 1000 * 1000ULL : DISPLAY_DIM_TIMEOUT_US);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "start dim timer failed: %s", esp_err_to_name(err));
         }
@@ -431,10 +462,31 @@ static void restart_deep_sleep_timer(void)
     }
 }
 
+/* Helligkeit im wachen Zustand: gewaehlte Stufe, beim Sparen hoechstens "Dunkel". */
+static uint8_t active_brightness(void)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    uint8_t level = BRIGHTNESS_STEPS[s_brightness_level % 3];
+    if (s_saver && level > BRIGHTNESS_STEPS[2]) {
+        level = BRIGHTNESS_STEPS[2];
+    }
+    return level;
+#else
+    return DISPLAY_ACTIVE_BRIGHTNESS;
+#endif
+}
+
+#if WRIST_WAKE_ENABLED
+static bool wrist_wake_allowed(void)
+{
+    return !s_cinema && !s_saver;
+}
+#endif
+
 static void note_activity(void)
 {
     if (s_display_dimmed) {
-        esp_err_t err = ui_status_set_brightness(DISPLAY_ACTIVE_BRIGHTNESS);
+        esp_err_t err = ui_status_set_brightness(active_brightness());
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "restore brightness failed: %s", esp_err_to_name(err));
         } else {
@@ -631,6 +683,9 @@ static void haptic_for_tone(audio_tone_t tone)
 static void play_tone(audio_tone_t tone)
 {
     haptic_for_tone(tone);
+    if (s_silent) {
+        return;
+    }
     if (audio_pipeline_is_busy()) {
         ESP_LOGD(TAG, "Ton uebersprungen, Aufnahmepfad belegt");
         return;
@@ -929,6 +984,15 @@ static void browse_button_down_cb(void *button_handle, void *usr_data)
     (void)usr_data;
     queue_app_event(APP_EVENT_BROWSE_DOWN);
 }
+
+#if CONFIG_VOICE_BOARD_WATCH206
+static void browse_button_long_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    queue_app_event(APP_EVENT_ACTION);
+}
+#endif
 
 static void browse_button_up_cb(void *button_handle, void *usr_data)
 {
@@ -1260,11 +1324,116 @@ static void ble_ota_cb(voice_ble_ota_event_t event, uint32_t written, uint32_t s
  * Waehrend der Aufnahme tut der Schirm nichts -- das Handgelenk liegt dabei
  * oft am Aermel.
  */
+static ui_control_state_t control_state(void)
+{
+    return (ui_control_state_t){
+        .brightness = BRIGHTNESS_NAMES[s_brightness_level % 3],
+        .silent = s_silent,
+        .cinema = s_cinema,
+        .saver = s_saver,
+        .battery_percent = s_battery_percent,
+        .charging = s_battery_charging,
+    };
+}
+
+static void apply_brightness_now(void)
+{
+    if (!s_display_dimmed) {
+        (void)ui_status_set_brightness(active_brightness());
+    }
+}
+
+/* Eine Kachel im Kontrollzentrum angetippt. */
+static void handle_control_tile(int tile)
+{
+    switch ((ui_control_tile_t)tile) {
+    case UI_CONTROL_BRIGHTNESS:
+        s_brightness_level = (uint8_t)((s_brightness_level + 1) % 3);
+        apply_brightness_now();
+        break;
+    case UI_CONTROL_SILENT:
+        s_silent = !s_silent;
+        break;
+    case UI_CONTROL_CINEMA:
+        s_cinema = !s_cinema;
+        break;
+    case UI_CONTROL_SAVER:
+        s_saver = !s_saver;
+        apply_brightness_now();
+        break;
+    case UI_CONTROL_TORCH:
+        ui_control_hide();
+        (void)ui_status_set_brightness(255);
+        ui_torch_set(true);
+        return;
+    default:
+        return;
+    }
+    voice_board_haptic_pattern(1, 25, 0);
+    const ui_control_state_t st = control_state();
+    ui_control_update(&st);
+}
+
+/*
+ * Hand aufs Display: alles still. Laufende Aufnahme verwerfen, Ton und
+ * Vibration aus, Schirm dunkel -- wie ein Abdecken bei Apple und Samsung.
+ */
+static void handle_palm(void)
+{
+    if (s_recording) {
+        abort_recording();
+    }
+    ui_torch_set(false);
+    ui_control_hide();
+    ui_cards_hide();
+    ui_status_show_home();
+    (void)ui_status_set_brightness(0);
+    s_display_dimmed = true;
+    ui_status_set_idle_dimmed(true);
+    if (s_display_dim_timer) {
+        (void)esp_timer_stop(s_display_dim_timer);
+    }
+}
+
 static void handle_touch(const app_event_t *event)
 {
+    if (event->gesture == VOICE_BOARD_PALM) {
+        handle_palm();
+        return;
+    }
+    if (ui_torch_on()) {
+        /* Taschenlampe: jede Beruehrung schaltet sie aus. */
+        ui_torch_set(false);
+        apply_brightness_now();
+        note_activity();
+        return;
+    }
     const bool was_dimmed = s_display_dimmed;
     note_activity();
     if (was_dimmed || s_recording) {
+        return;
+    }
+    if (ui_control_visible()) {
+        if (event->gesture == VOICE_BOARD_TAP) {
+            const int tile = ui_control_tile_at(event->touch_x, event->touch_y);
+            if (tile >= 0) {
+                handle_control_tile(tile);
+            }
+        } else if (event->gesture == VOICE_BOARD_SWIPE_UP ||
+                   event->gesture == VOICE_BOARD_SWIPE_DOWN) {
+            ui_control_hide();
+        }
+        return;
+    }
+    /*
+     * Vom oberen Rand nach unten: das Kontrollzentrum -- egal, was gerade
+     * zu sehen ist. Weiter unten angesetzt bleibt "nach unten" das
+     * Zurueck aufs Ziffernblatt.
+     */
+    if (event->gesture == VOICE_BOARD_SWIPE_DOWN && event->touch_y < 80) {
+        ui_cards_hide();
+        const ui_control_state_t st = control_state();
+        ui_control_show(&st);
         return;
     }
     if (ui_cards_visible()) {
@@ -1445,6 +1614,12 @@ static void app_event_task(void *arg)
         case APP_EVENT_BROWSE_UP: {
             ESP_LOGI(TAG, "button browse up");
             note_activity();
+            if (s_action_fired) {
+                /* Das Loslassen nach einem langen Druck gehoert zur Aktion. */
+                s_action_fired = false;
+                s_secondary_down_us = 0;
+                break;
+            }
             const uint32_t secondary_duration_ms = elapsed_button_ms(s_secondary_down_us);
             s_secondary_down_us = 0;
 
@@ -1482,6 +1657,24 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_TOUCH:
             handle_touch(&event);
+            break;
+        case APP_EVENT_ACTION:
+            /*
+             * Die Aktionstaste: was sie tut, legt die Bruecke fest (ein Satz,
+             * der als Text-Turn geht). Hier nur Rueckmeldung und Weitergabe.
+             */
+            note_activity();
+            s_action_fired = true;
+            if (s_recording) {
+                break;
+            }
+            if (voice_ble_send_action() == ESP_OK) {
+                voice_board_haptic_pattern(2, 40, 60);
+                apply_app_ui_state("thinking", "", "");
+            } else {
+                ui_status_set_not_connected();
+                play_tone(AUDIO_TONE_CANCEL);
+            }
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
@@ -1709,6 +1902,17 @@ static esp_err_t init_buttons(void)
     if (err != ESP_OK) {
         return err;
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    /*
+     * Aktionstaste: PWR lang (Voreinstellung der Komponente, 1,5 s). Kuerzer
+     * als die sechs Sekunden, nach denen der AXP2101 hart ausschaltet.
+     */
+    err = iot_button_register_cb(s_browse_button, BUTTON_LONG_PRESS_START, NULL,
+                                 browse_button_long_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
 
     BaseType_t ok = xTaskCreate(app_event_task, "app_event_task", 4096,
                                 NULL, 6, NULL);
@@ -1726,7 +1930,7 @@ static void display_dim_timer_cb(void *arg)
             ui_status_set_idle_dimmed(true);
 #if WRIST_WAKE_ENABLED
             /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
-            wrist_wake_watch(true);
+            wrist_wake_watch(wrist_wake_allowed());
 #endif
             ESP_LOGI(TAG, "display dimmed after inactivity");
         } else {
@@ -1899,7 +2103,18 @@ static void update_battery_status(void)
                                             (usb_powered != s_usb_powered);
         s_battery_charging = charging;
         s_usb_powered = usb_powered;
+        s_battery_percent = level;
         ui_status_set_battery(level, charging, usb_powered);
+#if CONFIG_VOICE_BOARD_WATCH206
+        if (charging || usb_powered) {
+            s_saver_auto_done = false;
+        } else if (!s_saver && !s_saver_auto_done && level <= SAVER_AUTO_PERCENT) {
+            s_saver = true;
+            s_saver_auto_done = true;
+            ESP_LOGI(TAG, "Akku %d %% -> Energiesparen an", level);
+            apply_brightness_now();
+        }
+#endif
         if (external_power_changed) {
             ESP_LOGI(TAG, "power source changed charging=%d usb=%d",
                      charging, usb_powered);
@@ -1971,6 +2186,17 @@ void app_main(void)
         ui_status_set_error("Bluetooth nicht bereit");
     } else {
         ui_status_set_device_name(voice_ble_device_name());
+        /*
+         * Bis hierher gekommen: Anzeige, Board und Bluetooth laufen -- die
+         * Fassung gilt als gut. Ohne diesen Aufruf faellt ein Bootloader mit
+         * Rueckfall (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) beim naechsten
+         * Neustart auf die vorige Fassung zurueck. Ein Abbild, das vorher
+         * abstuerzt, erreicht diese Zeile nie -- genau dann soll er das.
+         */
+        const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
+        if (valid_err != ESP_OK && valid_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "OTA-Fassung nicht bestaetigt: %s", esp_err_to_name(valid_err));
+        }
     }
 
     esp_err_t audio_err = audio_pipeline_init();
