@@ -257,6 +257,12 @@ static uint8_t s_history_next;
  */
 static int8_t s_history_cursor = -1;
 /*
+ * Steht gerade "Verlauf -- Noch keine Antwort" da? Dann bringt der naechste
+ * Druck zurueck, statt denselben Schirm noch einmal zu zeigen. Jede andere
+ * Szene loescht die Marke (set_scene_full).
+ */
+static bool s_empty_history_shown;
+/*
  * "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt.
  *
  * Zwoelf Byte fuer fuenf Zeichen: Der Uebersetzer rechnet bei `snprintf` mit
@@ -330,6 +336,7 @@ static lv_obj_t *create_blob(lv_obj_t *parent, int32_t w, int32_t h, lv_color_t 
 #define UI_HEADER_LABEL_Y 4
 #define UI_BATTERY_W 34
 #define UI_POSITION_X 14
+#define UI_HEADER_INSET_X 0
 #define UI_FONT_STATUS (&todoteck_font_16)
 #define UI_FONT_QUESTION (&todoteck_font_11)
 #define UI_FONT_SMALL (&todoteck_font_10)
@@ -355,7 +362,7 @@ static void create_battery_ui(lv_obj_t *screen)
     lv_label_set_long_mode(s_battery_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_battery_label, UI_BATTERY_W);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, UI_HEADER_LABEL_Y);
+    lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X, UI_HEADER_LABEL_Y);
 }
 
 /*
@@ -972,7 +979,7 @@ static void create_status_ui(void)
     lv_obj_set_style_pad_all(s_screen, UI_SCREEN_PAD, 0);
 
     s_ble_dot = create_blob(s_screen, UI_DOT_SIZE, UI_DOT_SIZE, lv_color_hex(0x8fb8ff));
-    lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, 0, UI_DOT_Y);
+    lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, UI_HEADER_INSET_X, UI_DOT_Y);
 
     create_battery_ui(s_screen);
     create_meters(s_screen);
@@ -1180,6 +1187,7 @@ static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
                            const char *position)
 {
     _lock_acquire(&s_lvgl_lock);
+    s_empty_history_shown = false;
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
@@ -1442,6 +1450,29 @@ void ui_status_set_idle_text(const char *text, const char *question)
  * fertig ist — so ist der Weg zurueck zur Uhr immer nur ein Druck mehr, und
  * die Position in der Kopfzeile sagt, wie viele es noch sind.
  */
+/*
+ * Wohin das Blaettern zurueckkehrt: auf das Ziffernblatt, wenn eine Bruecke
+ * verbunden ist -- sonst auf "Koppeln".
+ *
+ * Bis 10/2026 war es immer das Ziffernblatt. Ohne Bruecke sagte das "Bereit"
+ * zu einem Geraet, das gar nicht sprechen konnte; aufgefallen ist es an der
+ * Waveshare-Uhr, die nach dem ersten Druck auf PWR (dem Einschalten) im
+ * Verlauf stand und von dort nicht mehr nach "Koppeln" zurueckfand.
+ */
+static void show_home(void)
+{
+    char name[sizeof(s_device_name)];
+    _lock_acquire(&s_lvgl_lock);
+    const bool connected = s_link_connected;
+    strlcpy(name, s_device_name, sizeof(name));
+    _lock_release(&s_lvgl_lock);
+    if (connected) {
+        ui_status_set_idle();
+    } else {
+        ui_status_set_pairing(name);
+    }
+}
+
 void ui_status_browse_history(void)
 {
     char question[UI_QUESTION_MAX];
@@ -1450,15 +1481,29 @@ void ui_status_browse_history(void)
 
     _lock_acquire(&s_lvgl_lock);
     if (s_history_count == 0) {
+        /*
+         * Leerer Verlauf: einmal sagen, dass da nichts ist -- und beim
+         * naechsten Druck zurueck. Vorher blieb der Schirm hier stehen, und
+         * jeder weitere Druck zeigte dasselbe noch einmal: ein Geraet, das
+         * auf Tasten scheinbar nicht mehr reagiert.
+         */
+        const bool again = s_empty_history_shown;
         _lock_release(&s_lvgl_lock);
+        if (again) {
+            show_home();
+            return;
+        }
         set_scene(UI_STATUS_ICON_IDLE, "Verlauf", "Noch keine Antwort", UI_TEXT_HINT);
+        _lock_acquire(&s_lvgl_lock);
+        s_empty_history_shown = true;
+        _lock_release(&s_lvgl_lock);
         return;
     }
     s_history_cursor++;
     if (s_history_cursor >= (int8_t)s_history_count) {
         s_history_cursor = -1;
         _lock_release(&s_lvgl_lock);
-        ui_status_set_idle();
+        show_home();
         return;
     }
     /*
@@ -1495,6 +1540,13 @@ void ui_status_set_cancelled(void)
  * nichts geht an Todoteck. Die Zeile sagt gleich, was stattdessen zu tun ist —
  * "Abgebrochen" allein liesse offen, warum.
  */
+void ui_status_set_not_connected(void)
+{
+    ESP_LOGI(TAG, "Sprechtaste ohne Bruecke");
+    set_scene(UI_STATUS_ICON_PAIRING, "Nicht verbunden",
+              "Todoteck-Brücke auf dem Handy oder PC starten", UI_TEXT_HINT);
+}
+
 void ui_status_set_press_too_short(void)
 {
     ESP_LOGI(TAG, "Druck zu kurz");
