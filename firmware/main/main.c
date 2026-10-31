@@ -735,6 +735,8 @@ static uint32_t start_recording(void)
      * die I2S-Leitungen, und der Piep ist ohnehin das Signal "jetzt
      * sprechen" — er darf die ersten Silben nicht ueberlappen.
      */
+    /* Spricht die Uhr noch die letzte Antwort, hoert sie jetzt auf -- der Satz des Nutzers geht vor. */
+    audio_tone_speech_stop();
     play_tone(AUDIO_TONE_START);
 
     /*
@@ -1117,6 +1119,39 @@ static void check_event_reminder(void)
     }
 }
 
+/*
+ * Rahmen an `speaker_rx`: die gesprochene Antwort fuer den Lautsprecher der
+ * Uhr (audio_tone_speech_*). Waehrend einer Aufnahme wird nichts angenommen
+ * -- Mikrofon und Lautsprecher teilen sich die I2S-Leitungen.
+ */
+static void ble_speaker_cb(const uint8_t *data, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+    switch (data[0]) {
+    case 0x01: {
+        if (s_recording || s_silent) {
+            return;
+        }
+        const uint32_t rate = len >= 3 ? (uint32_t)(data[1] | (data[2] << 8)) : 8000;
+        (void)audio_tone_speech_begin(rate);
+        break;
+    }
+    case 0x02:
+        audio_tone_speech_feed(data + 1, len - 1);
+        break;
+    case 0x03:
+        audio_tone_speech_end();
+        break;
+    case 0x04:
+        audio_tone_speech_stop();
+        break;
+    default:
+        break;
+    }
+}
+
 static void ble_control_cb(const char *json)
 {
     cJSON *root = cJSON_Parse(json);
@@ -1380,6 +1415,7 @@ static void handle_control_tile(int tile)
  */
 static void handle_palm(void)
 {
+    audio_tone_speech_stop();
     if (s_recording) {
         abort_recording();
     }
@@ -2168,6 +2204,7 @@ void app_main(void)
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);
+    voice_ble_set_speaker_callback(ble_speaker_cb);
     voice_ble_set_ota_callback(ble_ota_cb);
     ESP_ERROR_CHECK(init_buttons());
 #if CONFIG_VOICE_BOARD_WATCH206

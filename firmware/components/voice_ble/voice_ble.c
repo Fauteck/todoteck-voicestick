@@ -84,6 +84,16 @@ static const ble_uuid128_t s_ota_rx_uuid =
 static const ble_uuid128_t s_ota_state_uuid =
     BLE_UUID128_INIT(0x05, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+/*
+ * Gesprochene Antworten an den Lautsprecher (Fork, Waveshare-Uhr). Ein Rahmen
+ * beginnt mit einem Typbyte: 0x01 Beginn (+ Abtastrate u16 LE), 0x02 Daten
+ * (IMA-ADPCM), 0x03 Ende, 0x04 Abbruch. Was damit geschieht, entscheidet
+ * main.c ueber voice_ble_set_speaker_callback().
+ */
+static const ble_uuid128_t s_speaker_uuid =
+    BLE_UUID128_INIT(0x06, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static voice_ble_speaker_cb_t s_speaker_cb;
 
 static void start_advertising(void);
 static void stop_advertising(void);
@@ -329,6 +339,34 @@ static int ota_abort(uint32_t transfer_id)
     return 0;
 }
 
+static int speaker_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    uint8_t buffer[520];
+    const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len == 0 || len > sizeof(buffer)) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (ble_hs_mbuf_to_flat(ctxt->om, buffer, len, NULL) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (s_speaker_cb) {
+        s_speaker_cb(buffer, len);
+    }
+    return 0;
+}
+
+void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb)
+{
+    s_speaker_cb = cb;
+}
+
 static int ota_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -472,6 +510,11 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                 .access_cb = notify_access_cb,
                 .val_handle = &s_ota_state_attr_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid = &s_speaker_uuid.u,
+                .access_cb = speaker_access_cb,
+                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {0},
         },

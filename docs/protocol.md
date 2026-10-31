@@ -35,6 +35,7 @@ Characteristics:
 | `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | host -> StickS3 | write without response |
 | `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | host -> StickS3 | write, write without response |
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> host | notify |
+| `speaker_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` | host -> device (fork) | write without response |
 <!-- /doku-vertrag -->
 
 The desktop app scans for this service and only connects to devices whose `VS-XXXX` ID is present in the local paired-device list. Multiple paired devices may be connected at the same time; audio, state, control, and OTA handling are scoped by CoreBluetooth peripheral identity.
@@ -207,6 +208,24 @@ areas below the answer; a tap sends
 and the bridge answers the open question with that text — the same as saying
 it. The StickS3 ignores `choices` and keeps the spoken answer. The next scene
 clears the areas.
+
+### Fork addition: spoken answers on the watch speaker (`speaker_rx`)
+
+The bridge can play the server's spoken answer on the watch instead of the
+phone. Every write to `speaker_rx` starts with a type byte:
+
+| Type | Payload | Meaning |
+| --- | --- | --- |
+| `0x01` | sample rate, u16 little endian (8000) | begin — replaces an answer still playing |
+| `0x02` | IMA-ADPCM, 4 bit per sample, low nibble first | audio |
+| `0x03` | — | end — play what is buffered, then close the speaker |
+| `0x04` | — | abort |
+
+The watch buffers up to 32 s in PSRAM and starts after 0.4 s of audio. It
+ignores `0x01` while recording or in silent mode, and stops playback when a
+recording starts or a palm covers the screen. IMA-ADPCM at 8 kHz is about
+4 KB/s — small enough for BLE next to everything else, and trivial to encode
+on the phone.
 
 ### Fork addition: watch face and cards (Waveshare watch)
 

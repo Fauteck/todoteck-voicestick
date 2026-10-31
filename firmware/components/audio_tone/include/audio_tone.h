@@ -1,5 +1,9 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 
 /*
@@ -33,3 +37,14 @@ esp_err_t audio_tone_init(void);
  * hinnehmbar.
  */
 void audio_tone_play(audio_tone_t tone);
+
+/*
+ * Gesprochene Antwort ueber den Lautsprecher (Uhr): IMA-ADPCM, 4 Bit,
+ * niedriges Halbbyte zuerst. begin -> feed ... -> end; stop bricht ab und
+ * wartet, bis die Leitungen frei sind (vor einer Aufnahme noetig).
+ */
+esp_err_t audio_tone_speech_begin(uint32_t sample_rate);
+void audio_tone_speech_feed(const uint8_t *data, size_t len);
+void audio_tone_speech_end(void);
+void audio_tone_speech_stop(void);
+bool audio_tone_speech_active(void);

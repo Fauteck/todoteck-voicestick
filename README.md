@@ -195,6 +195,7 @@ Watch-only on top of that:
 | Swipes | Left: one answer older, right: one newer, down: back to the watch face. A tap on a dimmed screen only wakes it |
 | Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
 | Cards: Today, Shopping, Home | Swipe up from the watch face. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md) |
+| Spoken answers on the watch | The bridge sends the server's TTS as 8 kHz IMA-ADPCM over `speaker_rx`; the watch buffers in PSRAM and plays through the ES8311. Stops when a recording starts |
 | Control centre | Swipe down from the top edge: brightness (three steps), silent (vibration only), cinema (no wrist wake, answers don't light the screen), power saving, torch (the whole screen white until the next touch), battery |
 | Power saving | Dimmer, dims after 6 s instead of 15, no wrist gesture. Switches itself on once per charge below 15 % |
 | Palm on the screen | Two or more touch points for a quarter second: a running recording is discarded, overlays close, the screen goes dark |
