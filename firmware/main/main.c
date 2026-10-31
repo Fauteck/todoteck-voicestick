@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -23,6 +24,7 @@
 #include "audio_pipeline.h"
 #include "audio_tone.h"
 #include "voice_board.h"
+#include "ui_cards.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
@@ -107,6 +109,14 @@ static bool s_recording_pm_locked;
 static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
+/*
+ * Der naechste Termin, wie ihn die Bruecke mit dem Ziffernblatt schickt
+ * (UTC-Sekunden, 0 = keiner) -- und ob fuer ihn schon vibriert wurde. Zehn
+ * Minuten vorher meldet sich die Uhr am Handgelenk, einmal je Termin.
+ */
+static volatile int64_t s_next_event_start;
+static volatile bool s_event_reminded;
+#define EVENT_REMINDER_LEAD_S (10 * 60)
 /* Erst nach dem Start darf der Akku-Takt die Schlafart umstellen. */
 static bool s_pm_ready;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
@@ -956,6 +966,93 @@ static void ble_connection_cb(bool connected)
     queue_app_event(connected ? APP_EVENT_BLE_CONNECTED : APP_EVENT_BLE_DISCONNECTED);
 }
 
+/*
+ * `face`: Zeilen fuer das Ziffernblatt und der naechste Termin.
+ *   {"event":"face","lines":["…","…"],"event_title":"Zahnarzt","event_start":1793520000}
+ * Direkt aus dem Bluetooth-Strang: ui_status nimmt sich die Anzeige-Sperre
+ * selbst, und die Daten sind zu gross fuer die Ereignis-Warteschlange.
+ */
+static void apply_face_command(const cJSON *root)
+{
+    char lines[UI_STATUS_FACE_LINES][UI_STATUS_FACE_LEN] = {{0}};
+    uint8_t count = 0;
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "lines");
+    const cJSON *item = NULL;
+    if (cJSON_IsArray(arr)) {
+        cJSON_ArrayForEach(item, arr) {
+            if (count >= UI_STATUS_FACE_LINES) {
+                break;
+            }
+            if (cJSON_IsString(item) && item->valuestring[0]) {
+                copy_utf8_clipped(lines[count++], item->valuestring, UI_STATUS_FACE_LEN);
+            }
+        }
+    }
+    const cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "event_title");
+    const cJSON *start = cJSON_GetObjectItemCaseSensitive(root, "event_start");
+    const int64_t start_s = cJSON_IsNumber(start) ? (int64_t)start->valuedouble : 0;
+    if (start_s != s_next_event_start) {
+        s_next_event_start = start_s;
+        s_event_reminded = false;
+    }
+    ui_status_set_face((const char (*)[UI_STATUS_FACE_LEN])lines, count,
+                       cJSON_IsString(title) ? title->valuestring : "", start_s);
+}
+
+/*
+ * `list`: eine Karte (Heute, Einkauf, Zuhause), in Teilen, weil eine
+ * Schreiboperation nur gut 240 Byte traegt.
+ *   {"event":"list","kind":"shopping","rev":7,"part":0,"items":[["Milch",""],["Brot",""]]}
+ * Teil 0 leert die Karte; `rev` kommt mit jedem Tippen zurueck, damit die
+ * Bruecke einen Index auf einer veralteten Liste nicht falsch zuordnet.
+ */
+static void apply_list_command(const cJSON *root)
+{
+    const cJSON *kind_item = cJSON_GetObjectItemCaseSensitive(root, "kind");
+    const int kind = ui_cards_kind_from_name(cJSON_IsString(kind_item) ? kind_item->valuestring : "");
+    if (kind < 0) {
+        return;
+    }
+    const cJSON *rev = cJSON_GetObjectItemCaseSensitive(root, "rev");
+    const cJSON *part = cJSON_GetObjectItemCaseSensitive(root, "part");
+    ui_cards_begin_part((ui_card_kind_t)kind, cJSON_IsNumber(rev) ? (uint16_t)rev->valuedouble : 0,
+                        cJSON_IsNumber(part) ? (uint8_t)part->valuedouble : 0);
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
+    const cJSON *entry = NULL;
+    if (cJSON_IsArray(items)) {
+        cJSON_ArrayForEach(entry, items) {
+            const cJSON *text = cJSON_GetArrayItem(entry, 0);
+            const cJSON *aux = cJSON_GetArrayItem(entry, 1);
+            if (cJSON_IsString(text)) {
+                ui_cards_add_item((ui_card_kind_t)kind, text->valuestring,
+                                  cJSON_IsString(aux) ? aux->valuestring : "");
+            }
+        }
+    }
+    ui_cards_commit((ui_card_kind_t)kind);
+}
+
+/*
+ * Zehn Minuten vor dem naechsten Termin: dreimal vibrieren und den Schirm
+ * wecken, auf dem der Countdown steht. Einmal je Termin -- geprueft im
+ * Akku-Takt (alle zehn Sekunden), genauer muss es nicht sein.
+ */
+static void check_event_reminder(void)
+{
+    const int64_t start = s_next_event_start;
+    if (start <= 0 || s_event_reminded) {
+        return;
+    }
+    const int64_t now = (int64_t)time(NULL);
+    if (now >= start - EVENT_REMINDER_LEAD_S && now < start) {
+        s_event_reminded = true;
+        ESP_LOGI(TAG, "Termin in %lld s -> Erinnerung", (long long)(start - now));
+        voice_board_haptic_pattern(3, 120, 150);
+        note_activity();
+        ui_status_show_home();
+    }
+}
+
 static void ble_control_cb(const char *json)
 {
     cJSON *root = cJSON_Parse(json);
@@ -990,6 +1087,10 @@ static void ble_control_cb(const char *json)
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
                              cJSON_IsString(question) ? question->valuestring : "",
                              cJSON_GetObjectItemCaseSensitive(root, "choices"));
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "face") == 0) {
+        apply_face_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
+        apply_list_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "interaction_mode") == 0 &&
                cJSON_IsString(mode)) {
         if (strcmp(mode->valuestring, "click_to_talk") == 0) {
@@ -1065,6 +1166,12 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
          */
         if (text && text[0]) {
             play_tone(AUDIO_TONE_DONE);
+#if CONFIG_VOICE_BOARD_WATCH206
+            /* Tecki freut sich drei Sekunden -- nur auf der Uhr, der StickS3 bleibt wie er ist. */
+            if (choice_count == 0) {
+                ui_status_set_mood(UI_STATUS_MOOD_HAPPY, 3000);
+            }
+#endif
         }
         note_activity();
         voice_ble_request_slow_interval();
@@ -1160,6 +1267,21 @@ static void handle_touch(const app_event_t *event)
     if (was_dimmed || s_recording) {
         return;
     }
+    if (ui_cards_visible()) {
+        ui_cards_hit_t hit;
+        const ui_cards_action_t action = ui_cards_touch(event->gesture, event->touch_x,
+                                                        event->touch_y, &hit);
+        if (action == UI_CARDS_ITEM) {
+            if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
+                voice_board_haptic_pattern(1, 40, 0);
+            } else {
+                play_tone(AUDIO_TONE_CANCEL);
+            }
+        } else if (action == UI_CARDS_CLOSE) {
+            ui_status_show_home();
+        }
+        return;
+    }
     switch ((voice_board_gesture_t)event->gesture) {
     case VOICE_BOARD_TAP: {
         char choice[UI_STATUS_CHOICE_LEN];
@@ -1181,12 +1303,23 @@ static void handle_touch(const app_event_t *event)
     }
     case VOICE_BOARD_SWIPE_LEFT:
         ui_status_browse_history();
+        ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
         break;
     case VOICE_BOARD_SWIPE_RIGHT:
         ui_status_browse_newer();
+        ui_status_set_mood(UI_STATUS_MOOD_LOOK_RIGHT, 1200);
         break;
     case VOICE_BOARD_SWIPE_DOWN:
         ui_status_show_home();
+        break;
+    case VOICE_BOARD_SWIPE_UP:
+        /*
+         * Hoch zu den Karten (Heute, Einkauf, Zuhause). Was dort steht, kam
+         * mit dem letzten Abgleich; die Bitte um einen frischen kostet
+         * nichts und zieht die Karte nach, sobald er da ist.
+         */
+        ui_cards_show(UI_CARD_TODAY);
+        (void)voice_ble_send_glance_request();
         break;
     default:
         break;
@@ -1374,6 +1507,7 @@ static void app_event_task(void *arg)
             /* fall through */
         case APP_EVENT_BATTERY_REFRESH:
             update_battery_status();
+            check_event_reminder();
             break;
         case APP_EVENT_ENTER_DEEP_SLEEP:
             enter_deep_sleep();

@@ -193,6 +193,9 @@ Watch-only on top of that:
 | Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
 | Swipes | Left: one answer older, right: one newer, down: back to the watch face. A tap on a dimmed screen only wakes it |
+| Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
+| Cards: Today, Shopping, Home | Swipe up from the watch face. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md) |
+| Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
 (its interrupt is on GPIO21), the SD card and the 32 MB flash (the partition

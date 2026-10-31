@@ -10,6 +10,17 @@
 #define UI_STATUS_CHOICES_MAX 3
 #define UI_STATUS_CHOICE_LEN 16
 
+/* Zeilen unter der Uhrzeit (nur die Uhr): hoechstens drei, je 40 Byte. */
+#define UI_STATUS_FACE_LINES 3
+#define UI_STATUS_FACE_LEN 41
+
+typedef enum {
+    UI_STATUS_MOOD_NONE,
+    UI_STATUS_MOOD_HAPPY,
+    UI_STATUS_MOOD_LOOK_LEFT,
+    UI_STATUS_MOOD_LOOK_RIGHT,
+} ui_status_mood_t;
+
 esp_err_t ui_status_init(void);
 esp_err_t ui_status_set_brightness(uint8_t brightness);
 void ui_status_prepare_deep_sleep(void);
@@ -30,6 +41,14 @@ void ui_status_show_home(void);
  * Antwortflaechen unter der gerade gezeigten Antwort (nur die Uhr). Die
  * naechste Szene raeumt sie wieder weg.
  */
+/*
+ * Was unter der Uhrzeit steht, und der naechste Termin (UTC-Sekunden, 0 =
+ * keiner). Die Uhr fuehrt den Countdown selbst nach.
+ */
+void ui_status_set_face(const char (*lines)[UI_STATUS_FACE_LEN], uint8_t count,
+                        const char *event_title, int64_t event_start);
+/* Teckis Stimmung fuer `duration_ms`, danach wieder die Szene. */
+void ui_status_set_mood(ui_status_mood_t mood, uint32_t duration_ms);
 void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t count);
 /* Welche Flaeche liegt unter dem Finger? -1: keine. `out` bekommt ihren Text. */
 int ui_status_choice_at(int16_t x, int16_t y, char *out, size_t out_size);

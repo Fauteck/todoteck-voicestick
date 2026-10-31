@@ -962,6 +962,20 @@ esp_err_t voice_ble_send_choice(uint8_t index, const char *text)
     return send_state_json(json);
 }
 
+esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index)
+{
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"item\",\"kind\":\"%s\",\"rev\":%u,\"index\":%u}",
+             kind ? kind : "", (unsigned)rev, (unsigned)index);
+    ESP_LOGI(TAG, "item %s rev=%u index=%u", kind ? kind : "", (unsigned)rev, (unsigned)index);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_glance_request(void)
+{
+    return send_state_json("{\"event\":\"glance_request\"}");
+}
+
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)
 {
     char json[96];

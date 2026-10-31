@@ -25,6 +25,7 @@
 #include "sdkconfig.h"
 #include "stick_s3_board.h"
 #include "ui_status_icons.h"
+#include "ui_status_internal.h"
 
 /*
  * Zwei Geraete, eine Anzeige-Logik. Was beim StickS3 hier als Mass oder
@@ -272,6 +273,24 @@ static char s_choices[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
 static uint8_t s_choice_count;
 static lv_obj_t *s_choice_btn[UI_STATUS_CHOICES_MAX];
 static lv_obj_t *s_choice_label[UI_STATUS_CHOICES_MAX];
+/*
+ * Was die Bruecke unter die Uhrzeit schreibt (naechste Aufgabe, Wetter,
+ * Muell) und der naechste Termin. Nur die Uhr zeigt das; der Termin laeuft
+ * als Countdown, den die Uhr selbst nachfuehrt -- die Bruecke schickt nur
+ * Titel und Beginn.
+ */
+static char s_face[UI_STATUS_FACE_LINES][UI_STATUS_FACE_LEN];
+static uint8_t s_face_count;
+static char s_event_title[UI_STATUS_FACE_LEN];
+static int64_t s_event_start;
+static lv_obj_t *s_face_label[UI_STATUS_FACE_LINES + 1];
+/*
+ * Teckis Stimmung fuer ein paar Sekunden ueber der Szene: freut sich ueber
+ * eine Antwort, schaut beim Wischen in die Richtung. Laeuft ab und faellt
+ * auf die Szene zurueck.
+ */
+static ui_status_mood_t s_mood;
+static lv_timer_t *s_mood_timer;
 /*
  * "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt.
  *
@@ -776,6 +795,112 @@ static void apply_battery_colour_locked(void)
                                 0);
 }
 
+#if UI_WATCH
+/* Ortsstunde aus Systemzeit und gemeldetem Abstand; -1 ohne gestellte Uhr. */
+static int local_hour(void)
+{
+    if (!s_clock_valid) {
+        return -1;
+    }
+    const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&now, &parts);
+    return parts.tm_hour;
+}
+#endif
+
+/*
+ * Der Termin als eine Zeile: "Zahnarzt in 25 min", "Jetzt: Zahnarzt",
+ * sonst "Zahnarzt 09:30". Leer, wenn keiner ansteht oder er schon eine halbe
+ * Stunde laeuft.
+ */
+static void format_event(char *out, size_t size)
+{
+    out[0] = '\0';
+    if (!s_event_title[0] || s_event_start <= 0 || !s_clock_valid) {
+        return;
+    }
+    const int64_t now = (int64_t)time(NULL);
+    const int64_t delta_min = (s_event_start - now) / 60;
+    if (delta_min < -30) {
+        return;
+    }
+    if (delta_min <= 0) {
+        snprintf(out, size, "Jetzt: %.30s", s_event_title);
+    } else if (delta_min < 60) {
+        snprintf(out, size, "%.28s in %d min", s_event_title, (int)delta_min);
+    } else {
+        const time_t start = (time_t)s_event_start + (time_t)s_clock_offset_min * 60;
+        struct tm parts;
+        gmtime_r(&start, &parts);
+        snprintf(out, size, "%.30s %02d:%02d", s_event_title, parts.tm_hour, parts.tm_min);
+    }
+}
+
+/*
+ * Die Zeilen unter der Uhrzeit: zuerst der Termin (er laeuft ab), dann was
+ * die Bruecke geschickt hat. Nur die Uhr legt die Labels an.
+ */
+#define FACE_CLOCK_Y (HEADER_H + 20)
+#define FACE_LINE_TOP (FACE_CLOCK_Y + 100)
+#define FACE_LINE_H 34
+
+static void render_face_lines_locked(bool visible, const char *event_line)
+{
+    if (!s_face_label[0]) {
+        return;
+    }
+    int row = 0;
+    for (int i = 0; i < UI_STATUS_FACE_LINES + 1; i++) {
+        lv_obj_add_flag(s_face_label[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!visible) {
+        return;
+    }
+    if (event_line[0]) {
+        lv_label_set_text(s_face_label[row], event_line);
+        lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0x5ec4ff), 0);
+        lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP);
+        lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
+        row++;
+    }
+    for (int i = 0; i < s_face_count && row < UI_STATUS_FACE_LINES + 1; i++, row++) {
+        lv_label_set_text(s_face_label[row], s_face[i]);
+        lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0xc9d1d9), 0);
+        lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + row * FACE_LINE_H);
+        lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Welche Pose Tecki tatsaechlich zeigt: Stimmung und Nacht vor der Szene. */
+static ui_status_icon_scene_t icon_scene_for(ui_status_icon_scene_t scene, bool clock_only)
+{
+    if (scene == UI_STATUS_ICON_IDLE || clock_only) {
+        switch (s_mood) {
+        case UI_STATUS_MOOD_HAPPY:
+            return UI_STATUS_ICON_HAPPY;
+        case UI_STATUS_MOOD_LOOK_LEFT:
+            return UI_STATUS_ICON_LOOK_LEFT;
+        case UI_STATUS_MOOD_LOOK_RIGHT:
+            return UI_STATUS_ICON_LOOK_RIGHT;
+        default:
+            break;
+        }
+    }
+#if UI_WATCH
+    /*
+     * Nachts schlaeft er: Auf dem Ziffernblatt zwischen 22 und 6 Uhr hat
+     * Tecki die Augen zu -- dieselbe Pose wie "Ruht", nur ohne den Schirm
+     * abzudunkeln, den man ja gerade ansieht.
+     */
+    const int hour = local_hour();
+    if (clock_only && hour >= 0 && (hour >= 22 || hour < 6)) {
+        return UI_STATUS_ICON_RESTING;
+    }
+#endif
+    return scene;
+}
+
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status,
                                 const char *question, const char *hint)
 {
@@ -795,7 +920,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                             clock_only ? UI_TECKI_BOX_SMALL : UI_TECKI_BOX,
                             clock_only ? CLOCK_FACE_TECKI_X : TECKI_X,
                             clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
-    ui_status_icons_apply(&s_icons, scene);
+    ui_status_icons_apply(&s_icons, icon_scene_for(scene, clock_only));
 
     const char *body_text = hint ? hint : "";
     const char *question_text = (question && question[0] && !clock_only) ? question : "";
@@ -844,11 +969,17 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_obj_set_style_text_font(s_clock_label,
                                    clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
         lv_obj_set_width(s_clock_label, clock_only ? CONTENT_W : plan.width);
+        char event_line[UI_STATUS_FACE_LEN + 12];
+        format_event(event_line, sizeof(event_line));
+        const bool face_info = clock_only && (s_face_count > 0 || event_line[0]) &&
+                               s_face_label[0] != NULL;
         lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, clock_only ? 0 : plan.x,
-                     clock_only ? CLOCK_FACE_Y : CLOCK_Y);
+                     face_info ? FACE_CLOCK_Y : clock_only ? CLOCK_FACE_Y : CLOCK_Y);
+        render_face_lines_locked(face_info, event_line);
         lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+        render_face_lines_locked(false, "");
     }
 
     lv_label_set_text(s_hint_label, body_text);
@@ -1017,6 +1148,14 @@ static void clock_tick_cb(lv_timer_t *timer)
     format_clock(now, sizeof(now));
     if (strcmp(now, lv_label_get_text(s_clock_label)) != 0) {
         lv_label_set_text(s_clock_label, now);
+        /*
+         * Einmal je Minute alles nachziehen: der Termin-Countdown laeuft,
+         * und um 22 Uhr schlaeft Tecki ein. Seltener als die Ziffern selbst
+         * ist es ohnehin nicht noetig.
+         */
+#if UI_WATCH
+        render_current_locked();
+#endif
     }
 }
 
@@ -1035,6 +1174,14 @@ static void create_status_ui(void)
     ui_status_icons_create(&s_icons, s_screen);
 
 #if UI_WATCH
+    for (int i = 0; i < UI_STATUS_FACE_LINES + 1; i++) {
+        s_face_label[i] = lv_label_create(s_screen);
+        lv_obj_set_style_text_font(s_face_label[i], &todoteck_watch_font_23, 0);
+        lv_label_set_long_mode(s_face_label[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(s_face_label[i], CONTENT_W - 2 * UI_HEADER_INSET_X);
+        lv_obj_set_style_text_align(s_face_label[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(s_face_label[i], LV_OBJ_FLAG_HIDDEN);
+    }
     for (int i = 0; i < UI_STATUS_CHOICES_MAX; i++) {
         s_choice_btn[i] = lv_obj_create(s_screen);
         lv_obj_remove_style_all(s_choice_btn[i]);
@@ -1250,6 +1397,7 @@ static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
     _lock_acquire(&s_lvgl_lock);
     s_empty_history_shown = false;
     s_choice_count = 0;
+    s_mood = UI_STATUS_MOOD_NONE;
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
@@ -1627,6 +1775,67 @@ void ui_status_set_cancelled(void)
  * nichts geht an Todoteck. Die Zeile sagt gleich, was stattdessen zu tun ist —
  * "Abgebrochen" allein liesse offen, warum.
  */
+void ui_status_lock(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+}
+
+void ui_status_unlock(void)
+{
+    _lock_release(&s_lvgl_lock);
+}
+
+lv_obj_t *ui_status_screen(void)
+{
+    return s_screen;
+}
+
+void ui_status_copy_display_text(char *dst, const char *src, size_t size)
+{
+    copy_utf8_display(dst, src, size);
+}
+
+void ui_status_set_face(const char (*lines)[UI_STATUS_FACE_LEN], uint8_t count,
+                        const char *event_title, int64_t event_start)
+{
+    if (count > UI_STATUS_FACE_LINES) {
+        count = UI_STATUS_FACE_LINES;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    for (uint8_t i = 0; i < count; i++) {
+        copy_utf8_display(s_face[i], lines[i], sizeof(s_face[i]));
+    }
+    s_face_count = count;
+    copy_utf8_display(s_event_title, event_title ? event_title : "", sizeof(s_event_title));
+    s_event_start = event_start;
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+}
+
+static void mood_expired_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    s_mood_timer = NULL;
+    s_mood = UI_STATUS_MOOD_NONE;
+    render_current_locked();
+}
+
+void ui_status_set_mood(ui_status_mood_t mood, uint32_t duration_ms)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_mood_timer) {
+        lv_timer_delete(s_mood_timer);
+        s_mood_timer = NULL;
+    }
+    s_mood = mood;
+    if (mood != UI_STATUS_MOOD_NONE && duration_ms > 0) {
+        s_mood_timer = lv_timer_create(mood_expired_cb, duration_ms, NULL);
+        lv_timer_set_repeat_count(s_mood_timer, 1);
+    }
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+}
+
 void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t count)
 {
 #if UI_WATCH

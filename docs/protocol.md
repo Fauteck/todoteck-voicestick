@@ -208,6 +208,35 @@ and the bridge answers the open question with that text — the same as saying
 it. The StickS3 ignores `choices` and keeps the spoken answer. The next scene
 clears the areas.
 
+### Fork addition: watch face and cards (Waveshare watch)
+
+The bridge keeps the watch face and three cards (`today`, `shopping`,
+`switches`) current. Both are optional; the StickS3 ignores them.
+
+```json
+{"event":"face","lines":["Pool rückspülen · 18:00","12° · Regen"],"event_title":"Zahnarzt","event_start":1793520000}
+{"event":"list","kind":"shopping","rev":7,"part":0,"items":[["Milch",""],["Brot",""]]}
+```
+
+`face` carries up to three lines (40 bytes each) shown under the time, plus the
+next calendar event (UTC seconds). The watch keeps the countdown itself and
+vibrates ten minutes before it starts.
+
+`list` arrives in parts because one write carries about 240 bytes: part `0`
+clears the card, every part appends `[text, aux]` pairs (aux is a time for
+`today`, `"1"`/`"0"` for `switches`). At most 15 entries per card. The watch
+never sees IDs; a tap on a row answers with kind, `rev` and position, and the
+bridge maps it back to the item it sent — a `rev` that no longer matches is
+ignored.
+
+```json
+{"event":"item","kind":"shopping","rev":7,"index":3}
+{"event":"glance_request"}
+```
+
+`glance_request` asks the bridge to send face and cards now (the watch sends it
+when the cards are opened by swiping up).
+
 ### Fork addition: `question` on `ui_state`
 
 The Todoteck bridge adds one optional field to the `ready` state:

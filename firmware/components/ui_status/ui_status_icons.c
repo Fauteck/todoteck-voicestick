@@ -162,6 +162,17 @@ static const scene_spec_t SPEC[] = {
         { 0.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.0f, -0.05f, -0.08f, true, LV_OPA_COVER },
     [UI_STATUS_ICON_ERROR] =
         { 9.0f, COL_MARK_ERROR, false, EYES_CROSSED, 1.0f, 0.0f, 0.0f, false, LV_OPA_COVER },
+    /*
+     * Freut sich: leicht zurueckgelehnt, grosse Augen, Blick nach oben --
+     * nach einer Antwort oder einem abgehakten Eintrag, fuer drei Sekunden.
+     * Schaut zur Seite: beim Wischen in die Richtung, in die es geht.
+     */
+    [UI_STATUS_ICON_HAPPY] =
+        { -6.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.25f, 0.0f, -0.09f, false, LV_OPA_COVER },
+    [UI_STATUS_ICON_LOOK_LEFT] =
+        { 0.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.0f, -0.11f, 0.0f, false, LV_OPA_COVER },
+    [UI_STATUS_ICON_LOOK_RIGHT] =
+        { 0.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.0f, 0.11f, 0.0f, false, LV_OPA_COVER },
 };
 
 #define SCENE_COUNT ((int)(sizeof(SPEC) / sizeof(SPEC[0])))

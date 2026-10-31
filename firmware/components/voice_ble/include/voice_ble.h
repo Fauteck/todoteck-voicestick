@@ -66,4 +66,8 @@ esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
  */
 /* Antwort auf eine Rueckfrage, angetippt auf dem Schirm (siehe ui_state `choices`). */
 esp_err_t voice_ble_send_choice(uint8_t index, const char *text);
+/* Zeile einer Karte angetippt (Uhr): Art ("today", "shopping", "switches"), Stand, Position. */
+esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index);
+/* Bitte an die Bruecke, Zifferblatt und Karten jetzt neu zu schicken. */
+esp_err_t voice_ble_send_glance_request(void);
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);
