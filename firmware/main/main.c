@@ -98,6 +98,8 @@ static bool s_recording_pm_locked;
 static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
+/* Erst nach dem Start darf der Akku-Takt die Schlafart umstellen. */
+static bool s_pm_ready;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
 static esp_timer_handle_t s_display_dim_timer;
 static esp_timer_handle_t s_deep_sleep_timer;
@@ -262,6 +264,36 @@ static void apply_interaction_mode(interaction_mode_t mode);
 static bool is_external_powered(void)
 {
     return s_battery_charging || s_usb_powered;
+}
+
+/*
+ * Light Sleep im Leerlauf -- ausser bei der Uhr am USB-Kabel.
+ *
+ * Die Waveshare-Uhr spricht USB ueber den eingebauten USB-Serial/JTAG-Block
+ * des S3, und der schlaeft im Light Sleep mit ein. Windows meldet dann "Ein an
+ * das System angeschlossenes Geraet funktioniert nicht", esptool kommt nicht
+ * an den Port, und weil die Uhr am Akku haengt, startet sie auch beim
+ * Umstecken nicht neu. Am Kabel kostet Wachbleiben nichts, was zaehlt.
+ * Der StickS3 bleibt beim bisherigen Verhalten: Er wird ueber Bluetooth
+ * aktualisiert und hat das Problem in der Praxis nicht gezeigt.
+ */
+static void apply_light_sleep(void)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    const bool light_sleep = !s_usb_powered;
+#else
+    const bool light_sleep = true;
+#endif
+    const esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = CONFIG_XTAL_FREQ,
+        .light_sleep_enable = light_sleep,
+    };
+    esp_err_t err = esp_pm_configure(&pm_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure: %s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "light sleep %s", light_sleep ? "an" : "aus (USB)");
 }
 
 static esp_err_t init_power_management(void)
@@ -1586,6 +1618,9 @@ static void update_battery_status(void)
             ESP_LOGI(TAG, "power source changed charging=%d usb=%d",
                      charging, usb_powered);
             restart_deep_sleep_timer();
+            if (s_pm_ready) {
+                apply_light_sleep();
+            }
         }
     } else {
         ESP_LOGW(TAG, "battery read failed: %s", esp_err_to_name(err));
@@ -1668,10 +1703,6 @@ void app_main(void)
     ESP_ERROR_CHECK(init_pmic_irq());
 
     ESP_LOGI(TAG, "configuring PMIC");
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-        .min_freq_mhz = CONFIG_XTAL_FREQ,
-        .light_sleep_enable = true,
-    };
-    esp_pm_configure(&pm_config);
+    s_pm_ready = true;
+    apply_light_sleep();
 }
