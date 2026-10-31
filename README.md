@@ -43,7 +43,7 @@ upstream code and untouched by this fork — see
 | Raising the wrist wakes the dimmed screen (BMI270, polled at 10 Hz while dimmed) — **built, then switched off** (`WRIST_WAKE_ENABLED 0` in `firmware/main/main.c`) | The idea: the screen dims after 15 s, and getting the time back meant pressing the side button — with the other hand, which is the movement a watch exists to avoid. The gesture is movement, then stillness, then a tilt of at least 20° against the pose before it; all three, because otherwise every step while walking wakes the screen. It is off all the same: only a button press is meant to bring the dimmed screen back, so the sensor is never set up and never polled. The component stays in the tree — the flag is the whole switch. Deep sleep always needed the button anyway: M5 documents the IMU interrupt as `G4 (PYG4_IMU_INT via M5PM1)`, and whether that reaches a wake-capable pin is a measurement nobody has taken |
 | The answer is set in the largest of six sizes (<!-- doku-vertrag:schriftstufen -->10, 11, 12, 13, 14, 16 px<!-- /doku-vertrag -->) that still fits the free area, each with its own line spacing | With only 10 px and 16 px to choose from, anything longer than a line landed in the smallest one — a two-sentence answer filled two thirds of the screen and left the rest white while being barely readable. The steps in between turn that white space into type size |
 | Characters the fonts lack are substituted or dropped, not drawn as boxes | Bridge answers carry emoji (check mark, calendar, folder) and typographic punctuation. The emoji showed as empty rectangles mid-sentence and are removed together with the gap around them; dashes, curly quotes and ellipses are replaced with their ASCII equivalents, because dropping them would turn "Aufgabe – heute" into "Aufgabe heute" |
-| The browse button steps back through the last five questions and answers, one per press, and lands back on the watch face after the oldest | The screen dims after 15 s and sleeps after 5 minutes; whoever looks later never read the answer. Recalling it costs nothing, asking again costs transcription, intent recognition and possibly a second task. Five, because the ring sits in internal RAM at 256 bytes an entry — anyone who needs to go further back looks in the app, where the history is complete anyway. The ring has an exit rather than a wrap: after the oldest entry the watch face returns, so the way back to the time is always one more press, and `2/5` in the header says how many that is |
+| The browse button steps back through the last five questions and answers, one per press, and lands back on the watch face after the oldest | The screen dims after 15 s and sleeps after 5 minutes; whoever looks later never read the answer. Recalling it costs nothing, asking again costs transcription, intent recognition and possibly a second task. Five, because the ring sits in internal RAM at 256 bytes an entry — anyone who needs to go further back looks in the app, where the history is complete anyway. The ring has an exit rather than a wrap: after the oldest entry the watch face returns, so the way back to the time is always one more press, and `2/5` in the header says how many that is (the watch shows a row of dots instead) |
 | The question is shown above the answer, as soon as the answer arrives — not only in the history (`question` field on the `ui_state` control event) | A misheard question is worth seeing while you can still say it again. It travels in the same write as the answer, so the two cannot drift apart, and a bridge that does not send one leaves the screen as it was: the status word `Bereit` above the answer |
 | It gets its own form: `todoteck_font_11`, two lines, muted, in quotes — not the semibold 16 the status word uses | Measured, not guessed: sixteen characters of the 16 px face fit the 150 px column, so `Leg eine Aufgabe an, Pool rückspülen` came out as `Leg eine Aufgabe...` — worthless as the headline of a history entry. Two lines of the 11 px face hold around sixty, which is what the bridge's 64-byte budget sends. The quotes are what marks it as a quote: `Pool rückspülen am Samstag` over `Aufgabe angelegt: …` would otherwise leave open which of the two sentences came from the device |
 | Connection dot carries the real link state (filled green connected, empty ring disconnected) | It used to be derived from the scene, so a bridge dropping mid-screen was only noticed at the next attempt |
@@ -192,15 +192,41 @@ Watch-only on top of that:
 | Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. On the StickS3 it stays off |
 | Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
-| Swipes | Left: one answer older, right: one newer, down: back to the watch face. A tap on a dimmed screen only wakes it |
+| Gestures | One rule set for every scene — see the gesture table below |
 | Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
-| Cards: Today, Shopping, Home | Swipe up from the watch face. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md) |
+| Cards: Today, Shopping, Home | Swipe up from the watch face or the history. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
+| Undo | For 5 s after a card tap a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` and restores the row |
+| Transcript first | The bridge shows what it understood (`transcript`) for 2 s before acting; "Abbrechen", a palm or a short press on the talk button stops it (`cancel_transcript`) |
+| Short answers | An answer longer than two lines shows its first sentence (at most ~90 characters) and "Tippen für mehr"; a tap shows the whole answer. Open yes/no questions are always shown in full. The history behaves the same and shows its position as dots |
+| Settings from the app | `watch_settings`: font size in three steps (answer, question line, card rows, transcript), how long until the watch returns to the face (an unread answer stays at least 2 min), which control-centre tiles show and in which order |
+| Clock in the header | Small `HH:MM` at the top of every scene except the watch face (which has the big one) and the torch — also over cards and the control centre |
 | Spoken answers on the watch | The bridge sends the server's TTS as 8 kHz IMA-ADPCM over `speaker_rx`; the watch buffers in PSRAM and plays through the ES8311. Stops when a recording starts |
-| Control centre | Swipe down from the top edge: brightness (three steps), silent (vibration only), cinema (no wrist wake, answers don't light the screen), power saving, torch (the whole screen white until the next touch), battery |
+| Control centre | Swipe down from the top edge: silent (vibration only), brightness (three steps), cinema (no wrist wake, answers don't light the screen), power saving, torch (the whole screen white until the next touch), battery — order and visibility set in the app |
 | Power saving | Dimmer, dims after 6 s instead of 15, no wrist gesture. Switches itself on once per charge below 15 % |
 | Palm on the screen | Two or more touch points for a quarter second: a running recording is discarded, overlays close, the screen goes dark |
 | Action button | Hold PWR for 1.5 s: the watch sends `{"event":"action"}`, and the bridge runs the sentence configured for it as a text turn (e.g. "Was steht heute an?") |
 | Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
+| Tecki as status | On the watch face and the ready scene a fixed ranking decides his pose: update running (eyes shut, dots) > no bridge (searching look) > battery ≤ 15 % without charging (tired) > mood > scene |
+
+Gestures on the watch — one rule set for every scene (the same table heads
+`handle_touch` in `firmware/main/main.c`; touch areas are listed in
+`firmware/components/ui_status/ui_layout_watch206.h`):
+
+| Gesture | Watch face | Answer / history | Cards | Control centre |
+| --- | --- | --- | --- | --- |
+| Swipe down from the top edge | control centre | control centre | control centre | closes |
+| Swipe down | nothing | back to the watch face | back one level (cards close) | closes |
+| Swipe up | cards | cards | next page | closes |
+| Swipe left | into the history | older | next card | — |
+| Swipe right | — | newer | previous card | — |
+| Tap | opens the history | yes/no; short ⇄ full answer; otherwise one older | check off / toggle; "Rückgängig" | tile |
+| Palm on the screen | everything quiet: recording discarded, layers closed, screen dark | | | |
+
+A dimmed screen is only woken by the first touch; during a recording the
+screen does nothing; during the transcript only "Abbrechen" (and a palm)
+count; with the torch on, any touch switches it off. Cards do not open while
+the watch is thinking or waiting for a confirmation, and nothing opens over
+the transcript.
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
 (its interrupt is on GPIO21), the SD card and the 32 MB flash (the partition

@@ -60,12 +60,10 @@
  * (Bereit und Ruht) sitzt Tecki klein in der Ecke, damit die Uhrzeit den
  * Schirm bekommt. Ueberall sonst bleibt er in seiner Spalte. Die Flaeche ist
  * deshalb eine Laufzeitgroesse, kein Makro mehr — die Geometrie faellt
- * weiterhin vollstaendig aus ihr heraus, sie wird nur bei einem Wechsel neu
- * ausgerechnet statt einmal beim Anlegen.
+ * weiterhin vollstaendig aus ihr heraus. Seit 10/2026 traegt sie jede Figur
+ * selbst (ui_status_icons_t: box, x, y), weil auf der Uhr zwei zugleich
+ * stehen koennen.
  */
-static int32_t s_box = UI_TECKI_BOX;
-static int32_t s_icon_x;
-static int32_t s_icon_y = 35;
 
 /* ── Geometrie, alles abgeleitet ──────────────────────────────────────────── */
 /*
@@ -74,13 +72,13 @@ static int32_t s_icon_y = 35;
  * auch bei einer anderen Flaeche noch stimmt: Wer die Figur groesser oder
  * kleiner will, aendert die Flaeche, und der Rand waechst mit.
  */
-#define MARK_WIDTH (0.90625f * (float)s_box)
-#define MARK_K     (MARK_WIDTH / 336.0f)
-#define STROKE_W   (76.0f * MARK_K)
-#define EYE_R      (0.25f * STROKE_W)
-#define PUPIL_R    (0.12f * STROKE_W)
-#define LID_H      (0.07f * STROKE_W)
-#define CROSS_W    (0.10f * STROKE_W)
+#define MARK_WIDTH(b) (0.90625f * (float)(b))
+#define MARK_K(b)     (MARK_WIDTH(b) / 336.0f)
+#define STROKE_W(b)   (76.0f * MARK_K(b))
+#define EYE_R(b)      (0.25f * STROKE_W(b))
+#define PUPIL_R(b)    (0.12f * STROKE_W(b))
+#define LID_H(b)      (0.07f * STROKE_W(b))
+#define CROSS_W(b)    (0.10f * STROKE_W(b))
 
 /*
  * Die duennste Linie, die der Zeichner noch sichtbar ausgibt. Bei der kleinen
@@ -173,18 +171,21 @@ static const scene_spec_t SPEC[] = {
         { 0.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.0f, -0.11f, 0.0f, false, LV_OPA_COVER },
     [UI_STATUS_ICON_LOOK_RIGHT] =
         { 0.0f, COL_MARK_LIGHT, false, EYES_OPEN, 1.0f, 0.11f, 0.0f, false, LV_OPA_COVER },
+    /*
+     * Die Statusposen. "Update laeuft": Augen zu und die drei Punkte -- er
+     * ist beschaeftigt, nicht muede. "Akku niedrig": gekippt wie beim Ruhen,
+     * kleine Augen mit Blick nach unten, etwas blasser. Der Winkel bleibt
+     * bei 8 Grad, innerhalb dessen, wofuer der Rand unten gerechnet ist.
+     */
+    [UI_STATUS_ICON_UPDATING] =
+        { 0.0f, COL_MARK_LIGHT, false, EYES_CLOSED, 1.0f, 0.0f, 0.0f, true, LV_OPA_COVER },
+    [UI_STATUS_ICON_TIRED] =
+        { 8.0f, COL_MARK_LIGHT, false, EYES_OPEN, 0.75f, 0.0f, 0.09f, false, LV_OPA_70 },
 };
 
 #define SCENE_COUNT ((int)(sizeof(SPEC) / sizeof(SPEC[0])))
-
-/*
- * Einmal beim Anlegen ausgerechnet. lv_line behaelt den Zeiger auf die Punkte,
- * also muessen sie leben, solange das Objekt lebt — deshalb statisch und je
- * Szene getrennt, statt ein Feld bei jedem Wechsel zu ueberschreiben.
- */
-static lv_point_precise_t s_body[SCENE_COUNT][3];
-static lv_point_precise_t s_cross[4][2];
-static float s_eye_xy[SCENE_COUNT][2][2];
+_Static_assert(sizeof(SPEC) / sizeof(SPEC[0]) == UI_STATUS_ICON_COUNT,
+               "jede Pose braucht eine Zeile in SPEC");
 
 /* Eigene Konstante statt M_PI: das haengt an Feature-Test-Makros und ist
  * nicht ueberall ohne Weiteres da. */
@@ -200,44 +201,54 @@ static void rotate_about(float px, float py, float ox, float oy, float rad, floa
     *ry = oy + dx * s + dy * c;
 }
 
-static void compute_geometry(void)
+/* Ursprung der Figur in ihrer Flaeche und der Knick als Drehpunkt. */
+typedef struct {
+    float k;
+    float x0;
+    float y0;
+    float vx;
+    float vy;
+} mark_frame_t;
+
+static mark_frame_t mark_frame(int32_t box)
 {
-    const float x0 = ((float)s_box - MARK_WIDTH) / 2.0f;
-    const float y0 = ((float)s_box - 199.0f * MARK_K) / 2.0f;
-    const float vx = MARK_PTS[1][0] * MARK_K + x0;
-    const float vy = MARK_PTS[1][1] * MARK_K + y0;
+    mark_frame_t f;
+    f.k = MARK_K(box);
+    f.x0 = ((float)box - MARK_WIDTH(box)) / 2.0f;
+    f.y0 = ((float)box - 199.0f * f.k) / 2.0f;
+    f.vx = MARK_PTS[1][0] * f.k + f.x0;
+    f.vy = MARK_PTS[1][1] * f.k + f.y0;
+    return f;
+}
 
-    for (int scene = 0; scene < SCENE_COUNT; scene++) {
-        const float rad = SPEC[scene].angle_deg * TECKI_PI / 180.0f;
-        for (int i = 0; i < 3; i++) {
-            float rx, ry;
-            rotate_about(MARK_PTS[i][0] * MARK_K + x0, MARK_PTS[i][1] * MARK_K + y0,
-                         vx, vy, rad, &rx, &ry);
-            s_body[scene][i].x = lroundf(rx);
-            s_body[scene][i].y = lroundf(ry);
-        }
-        for (int i = 0; i < 2; i++) {
-            float rx, ry;
-            rotate_about(MARK_EYES[i][0] * MARK_K + x0, MARK_EYES[i][1] * MARK_K + y0,
-                         vx, vy, rad, &rx, &ry);
-            s_eye_xy[scene][i][0] = rx;
-            s_eye_xy[scene][i][1] = ry;
-        }
-    }
-
-    /* Die Kreuze im Fehlerfall sitzen auf den dortigen Augenmitten. */
-    const float arm = 0.85f * EYE_R;
+/* Augenmitten einer Pose, gedreht wie der Koerper. */
+static void eye_centres(const mark_frame_t *f, ui_status_icon_scene_t scene, float out[2][2])
+{
+    const float rad = SPEC[scene].angle_deg * TECKI_PI / 180.0f;
     for (int i = 0; i < 2; i++) {
-        const float cx = s_eye_xy[UI_STATUS_ICON_ERROR][i][0];
-        const float cy = s_eye_xy[UI_STATUS_ICON_ERROR][i][1];
-        s_cross[i * 2][0].x = lroundf(cx - arm);
-        s_cross[i * 2][0].y = lroundf(cy - arm);
-        s_cross[i * 2][1].x = lroundf(cx + arm);
-        s_cross[i * 2][1].y = lroundf(cy + arm);
-        s_cross[i * 2 + 1][0].x = lroundf(cx + arm);
-        s_cross[i * 2 + 1][0].y = lroundf(cy - arm);
-        s_cross[i * 2 + 1][1].x = lroundf(cx - arm);
-        s_cross[i * 2 + 1][1].y = lroundf(cy + arm);
+        rotate_about(MARK_EYES[i][0] * f->k + f->x0, MARK_EYES[i][1] * f->k + f->y0,
+                     f->vx, f->vy, rad, &out[i][0], &out[i][1]);
+    }
+}
+
+/* Die Kreuze im Fehlerfall sitzen auf den dortigen Augenmitten. */
+static void compute_cross(ui_status_icons_t *icons)
+{
+    const mark_frame_t f = mark_frame(icons->box);
+    float eyes[2][2];
+    eye_centres(&f, UI_STATUS_ICON_ERROR, eyes);
+    const float arm = 0.85f * EYE_R(icons->box);
+    for (int i = 0; i < 2; i++) {
+        const float cx = eyes[i][0];
+        const float cy = eyes[i][1];
+        icons->cross_pts[i * 2][0].x = lroundf(cx - arm);
+        icons->cross_pts[i * 2][0].y = lroundf(cy - arm);
+        icons->cross_pts[i * 2][1].x = lroundf(cx + arm);
+        icons->cross_pts[i * 2][1].y = lroundf(cy + arm);
+        icons->cross_pts[i * 2 + 1][0].x = lroundf(cx + arm);
+        icons->cross_pts[i * 2 + 1][0].y = lroundf(cy - arm);
+        icons->cross_pts[i * 2 + 1][1].x = lroundf(cx - arm);
+        icons->cross_pts[i * 2 + 1][1].y = lroundf(cy + arm);
     }
 }
 
@@ -251,12 +262,12 @@ static lv_obj_t *make_blob(lv_obj_t *parent)
     return o;
 }
 
-static lv_obj_t *make_stroke(lv_obj_t *parent)
+static lv_obj_t *make_stroke(lv_obj_t *parent, int32_t box)
 {
     lv_obj_t *o = lv_line_create(parent);
     lv_obj_remove_style_all(o);
     lv_obj_set_pos(o, 0, 0);
-    lv_obj_set_size(o, s_box, s_box);
+    lv_obj_set_size(o, box, box);
     lv_obj_set_style_line_rounded(o, true, 0);
     return o;
 }
@@ -280,16 +291,18 @@ static void show(lv_obj_t *o, bool visible)
 void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
 {
     memset(icons, 0, sizeof(*icons));
-    compute_geometry();
+    icons->box = UI_TECKI_BOX;
+    icons->y = 35;
+    compute_cross(icons);
 
     icons->root = lv_obj_create(screen);
     lv_obj_remove_style_all(icons->root);
     lv_obj_remove_flag(icons->root, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(icons->root, s_box, s_box);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, s_icon_x, s_icon_y);
+    lv_obj_set_size(icons->root, icons->box, icons->box);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, icons->x, icons->y);
 
-    icons->body = make_stroke(icons->root);
-    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W), 0);
+    icons->body = make_stroke(icons->root, icons->box);
+    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W(icons->box)), 0);
 
     for (int i = 0; i < 2; i++) {
         icons->eye[i] = make_blob(icons->root);
@@ -301,9 +314,9 @@ void ui_status_icons_create(ui_status_icons_t *icons, lv_obj_t *screen)
         lv_obj_set_style_bg_color(icons->pupil[i], lv_color_hex(COL_PUPIL), 0);
     }
     for (int i = 0; i < 4; i++) {
-        icons->cross[i] = make_stroke(icons->root);
-        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W), 0);
-        lv_line_set_points(icons->cross[i], s_cross[i], 2);
+        icons->cross[i] = make_stroke(icons->root, icons->box);
+        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W(icons->box)), 0);
+        lv_line_set_points(icons->cross[i], icons->cross_pts[i], 2);
     }
     for (int i = 0; i < UI_TECKI_THINK_DOTS; i++) {
         icons->dot[i] = make_blob(icons->root);
@@ -348,26 +361,44 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
     }
     ui_status_icons_stop_anim(icons);
 
+    const int32_t box = icons->box;
     const scene_spec_t *s = &SPEC[scene];
     const uint32_t eye_colour = s->dark_ground ? COL_EYE_DARK : COL_EYE_LIGHT;
-    const float eye_r = EYE_R * s->eye_scale;
+    const float eye_r = EYE_R(box) * s->eye_scale;
+    const float stroke = STROKE_W(box);
 
-    lv_line_set_points(icons->body, s_body[scene], 3);
+    /*
+     * Die Punkte dieser einen Pose, gedreht um den Knick. lv_line behaelt den
+     * Zeiger auf body_pts; set_points meldet die Flaeche danach neu an.
+     */
+    const mark_frame_t f = mark_frame(box);
+    const float rad = s->angle_deg * TECKI_PI / 180.0f;
+    for (int i = 0; i < 3; i++) {
+        float rx, ry;
+        rotate_about(MARK_PTS[i][0] * f.k + f.x0, MARK_PTS[i][1] * f.k + f.y0,
+                     f.vx, f.vy, rad, &rx, &ry);
+        icons->body_pts[i].x = lroundf(rx);
+        icons->body_pts[i].y = lroundf(ry);
+    }
+    float eyes[2][2];
+    eye_centres(&f, scene, eyes);
+
+    lv_line_set_points(icons->body, icons->body_pts, 3);
     lv_obj_set_style_line_color(icons->body, lv_color_hex(s->mark), 0);
 
     for (int i = 0; i < 2; i++) {
-        const float cx = s_eye_xy[scene][i][0];
-        const float cy = s_eye_xy[scene][i][1];
+        const float cx = eyes[i][0];
+        const float cy = eyes[i][1];
 
         lv_obj_set_style_bg_color(icons->eye[i], lv_color_hex(eye_colour), 0);
         place_circle(icons->eye[i], cx, cy, eye_r);
-        place_circle(icons->pupil[i], cx + s->gaze_x * STROKE_W, cy + s->gaze_y * STROKE_W,
-                     PUPIL_R);
+        place_circle(icons->pupil[i], cx + s->gaze_x * stroke, cy + s->gaze_y * stroke,
+                     PUPIL_R(box));
 
         /* Geschlossenes Auge: ein liegender Balken statt der Scheibe. */
         lv_obj_set_style_bg_color(icons->lid[i], lv_color_hex(eye_colour), 0);
         const int32_t lid_w = (int32_t)lroundf(eye_r * 2.0f);
-        int32_t lid_h = (int32_t)lroundf(LID_H * 2.0f);
+        int32_t lid_h = (int32_t)lroundf(LID_H(box) * 2.0f);
         if (lid_h < 2) {
             lid_h = 2; /* darunter verschwindet der Strich beim Zeichnen */
         }
@@ -396,45 +427,43 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
     };
     for (int i = 0; i < UI_TECKI_THINK_DOTS; i++) {
         lv_obj_set_style_bg_color(icons->dot[i], lv_color_hex(s->mark), 0);
-        place_circle(icons->dot[i], DOT_POS[i][0] * (float)s_box,
-                     DOT_POS[i][1] * (float)s_box, DOT_POS[i][2] * STROKE_W);
+        place_circle(icons->dot[i], DOT_POS[i][0] * (float)box,
+                     DOT_POS[i][1] * (float)box, DOT_POS[i][2] * stroke);
         show(icons->dot[i], s->dots);
     }
 
     lv_obj_set_style_opa(icons->root, s->opa, 0);
-    lv_obj_set_size(icons->root, s_box, s_box);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, s_icon_x, s_icon_y);
+    lv_obj_set_size(icons->root, box, box);
+    lv_obj_align(icons->root, LV_ALIGN_TOP_LEFT, icons->x, icons->y);
 }
 
 /*
- * Flaeche und Ecke fuer die naechste Szene.
+ * Flaeche und Ecke fuer die naechste Pose dieser Figur.
  *
- * Die Punkte werden nur neu gerechnet, wenn sich die Flaeche wirklich
- * geaendert hat: Das sind sieben Szenen mal fuenf gedrehte Punkte, also
- * einige Dutzend Sinus-Aufrufe — nichts, was bei einem Szenenwechsel
- * auffiele, aber auch nichts, was bei jedem Nachziehen der Minute laufen
- * muss. `lv_line` behaelt den Zeiger auf die Punkte, deshalb setzt der
- * anschliessende ui_status_icons_apply() sie ohnehin neu.
+ * Neu gerechnet und neu bemessen wird nur, wenn sich die Flaeche wirklich
+ * geaendert hat -- sonst meldete jedes Nachziehen der Minute Flaechen als
+ * ungueltig, die genauso aussehen wie vorher. Den Koerper setzt der
+ * anschliessende ui_status_icons_apply() ohnehin neu.
  */
 void ui_status_icons_set_box(ui_status_icons_t *icons, int32_t box, int32_t x, int32_t y)
 {
-    s_icon_x = x;
-    s_icon_y = y;
-    if (box == s_box) {
+    icons->x = x;
+    icons->y = y;
+    if (box == icons->box) {
         return;
     }
-    s_box = box;
-    compute_geometry();
+    icons->box = box;
+    compute_cross(icons);
     if (icons->root == NULL) {
         return;
     }
-    lv_obj_set_size(icons->root, s_box, s_box);
-    lv_obj_set_size(icons->body, s_box, s_box);
-    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W), 0);
+    lv_obj_set_size(icons->root, box, box);
+    lv_obj_set_size(icons->body, box, box);
+    lv_obj_set_style_line_width(icons->body, line_width(STROKE_W(box)), 0);
     for (int i = 0; i < 4; i++) {
-        lv_obj_set_size(icons->cross[i], s_box, s_box);
-        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W), 0);
-        lv_line_set_points(icons->cross[i], s_cross[i], 2);
+        lv_obj_set_size(icons->cross[i], box, box);
+        lv_obj_set_style_line_width(icons->cross[i], line_width(CROSS_W(box)), 0);
+        lv_line_set_points(icons->cross[i], icons->cross_pts[i], 2);
     }
 }
 

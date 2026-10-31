@@ -72,6 +72,10 @@ esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index);
 esp_err_t voice_ble_send_glance_request(void);
 /* Aktionstaste der Uhr (PWR lang): was sie tut, legt die Bruecke fest. */
 esp_err_t voice_ble_send_action(void);
+/* "Abbrechen" in der Transkript-Szene der Uhr: die Bruecke fuehrt den Satz nicht aus. */
+esp_err_t voice_ble_send_cancel_transcript(void);
+/* "Rueckgaengig" auf einer Karte: die Bruecke macht die letzte Karten-Aktion (`item`) rueckgaengig. */
+esp_err_t voice_ble_send_undo(void);
 /* Rahmen an `speaker_rx` (Typbyte + Nutzlast), aus dem Bluetooth-Strang gerufen. */
 typedef void (*voice_ble_speaker_cb_t)(const uint8_t *data, size_t len);
 void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb);

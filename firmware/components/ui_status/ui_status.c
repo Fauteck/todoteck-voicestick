@@ -24,6 +24,8 @@
 #include "lvgl.h"
 #include "sdkconfig.h"
 #include "stick_s3_board.h"
+#include "ui_cards.h"
+#include "ui_control.h"
 #include "ui_status_icons.h"
 #include "ui_status_internal.h"
 
@@ -301,6 +303,30 @@ static lv_timer_t *s_mood_timer;
  * Bereich fuer den Uebersetzer nachweist.
  */
 static char s_position_text[12];
+/*
+ * Kurzform (nur die Uhr): Eine Antwort, die nicht in zwei Zeilen passt,
+ * steht zuerst gekuerzt da, mit "Tippen fuer mehr" darunter. `s_shortable`
+ * sagt, ob die laufende Szene eine Antwort ist (frisch oder aus dem Verlauf),
+ * `s_expanded`, ob sie gerade lang gezeigt wird. Jede Szene setzt beides
+ * zurueck.
+ */
+static bool s_shortable;
+static bool s_expanded;
+/* Transkript-Szene: bis wann "Abbrechen" noch gilt (esp_timer-Mikrosekunden). */
+static int64_t s_transcript_deadline_us;
+/* Fuer Teckis Statuspose: Update laeuft, Akkustand in Prozent (-1 unbekannt). */
+static bool s_updating;
+static int s_battery_percent = -1;
+/* Steht die Uhrzeit gerade gross in der Szene? Dann nicht noch einmal oben. */
+static bool s_main_clock_shown;
+#if UI_WATCH
+static lv_obj_t *s_header_clock;
+static lv_obj_t *s_more_btn;
+static lv_obj_t *s_cancel_btn;
+static lv_obj_t *s_cancel_track;
+static lv_obj_t *s_cancel_fill;
+static ui_dots_t s_history_dots;
+#endif
 
 #if !UI_WATCH
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
@@ -599,6 +625,66 @@ static const text_step_t TEXT_STEPS[] = {
 /* Die kleinste Stufe: Rueckfall, wenn selbst sie ueberlaeuft. */
 #define TEXT_STEP_SMALLEST (TEXT_STEPS[TEXT_STEP_COUNT - 1])
 
+/*
+ * Schriftgroesse in drei Stufen (nur die Uhr; eingestellt in der App, kommt
+ * mit `watch_settings`). Sie waehlt fuer die Auskunft -- Antwort, Verlauf,
+ * Transkript -- einen Ausschnitt der Schriftleiter oben, statt neue
+ * Schriften mitzubringen:
+ *
+ *   Stufe     Antwort        Fragezeile   Kartenzeile (ui_cards.c)
+ *   s  (0)    26 ... 18      18           20, 7 Zeilen je Seite
+ *   m  (1)    30 ... 18      20           23, 6 Zeilen (bisheriges Bild)
+ *   l  (2)    30 ... 23      23           26, 5 Zeilen
+ *
+ * Was bei `l` nicht in 23 passt, bekommt ohnehin die Kurzform mit "mehr"
+ * (siehe make_short_form). Die Vollansicht braucht weder Blaettern noch
+ * Seitenteilung: Eine Antwort ist hoechstens 191 Byte lang, und die stehen
+ * selbst in der 23er ohne Tecki in rund acht Zeilen zu 31 Pixeln -- 250 von
+ * mindestens 280 freien Pixeln, auch mit Ja/Nein-Flaechen darunter. Was
+ * trotzdem ueberliefe, endet wie bisher mit Auslassungspunkten.
+ *
+ * Hinweise (UI_TEXT_HINT) folgen der Stufe nicht: Sie sind Beiwerk und
+ * bleiben klein.
+ */
+static uint8_t s_font_level = 1;
+#if UI_WATCH
+static const uint8_t LEVEL_FIRST_STEP[3] = { 1, 0, 0 };
+static const uint8_t LEVEL_LAST_STEP[3] = { 4, 4, 2 };
+static const lv_font_t *const LEVEL_QUESTION_FONT[3] = {
+    &todoteck_watch_font_18, &todoteck_watch_font_20, &todoteck_watch_font_23,
+};
+_Static_assert(TEXT_STEP_COUNT == 5, "LEVEL_*_STEP zaehlt fuenf Stufen");
+#endif
+
+/* Erste und letzte Stufe, die die Auskunft bei der eingestellten Groesse nimmt. */
+static size_t message_first_step(void)
+{
+#if UI_WATCH
+    return LEVEL_FIRST_STEP[s_font_level % 3];
+#else
+    return 0;
+#endif
+}
+
+static size_t message_last_step(void)
+{
+#if UI_WATCH
+    return LEVEL_LAST_STEP[s_font_level % 3];
+#else
+    return TEXT_STEP_COUNT - 1;
+#endif
+}
+
+/* Schrift der Fragezeile ueber der Antwort -- auf der Uhr nach Stufe. */
+static const lv_font_t *question_font(void)
+{
+#if UI_WATCH
+    return LEVEL_QUESTION_FONT[s_font_level % 3];
+#else
+    return UI_FONT_QUESTION;
+#endif
+}
+
 typedef struct {
     bool tecki;                    /* bleibt die Figur stehen? */
     const lv_font_t *font;         /* Schrift des unteren Texts */
@@ -630,17 +716,60 @@ typedef struct {
 #define QUESTION_LINES 2
 #define QUESTION_LINE_SPACE 1
 #endif
-#define QUESTION_H (QUESTION_LINES * UI_FONT_QUESTION->line_height + \
+#define QUESTION_H (QUESTION_LINES * question_font()->line_height + \
                     (QUESTION_LINES - 1) * QUESTION_LINE_SPACE)
 
 /* Hoehe einer Antwortflaeche und Abstand darueber -- nur die Uhr hat sie. */
 #define CHOICE_H 72
 #define CHOICE_GAP 10
 
-/* Unterkante des Texts: ueber den Antwortflaechen, wenn welche stehen. */
+#if UI_WATCH
+/*
+ * Was die Uhr sonst noch unter den Text stellt (Masse siehe auch die
+ * Trefferflaechen-Tabelle in ui_layout_watch206.h):
+ *
+ *   Seitenpunkte des Verlaufs  ganz unten, 8 px, eine Reihe
+ *   "Tippen fuer mehr"         darueber, MORE_H hoch, wenn die Kurzform steht
+ *   "Abbrechen" + Balken       in der Transkript-Szene
+ */
+#define DOTS_ROW_H 20
+#define MORE_H 52
+#define MORE_W 280
+#define MORE_GAP 8
+#define CANCEL_H 64
+#define CANCEL_GAP 10
+#define CANCEL_BAR_H 6
+#define CANCEL_BAR_GAP 12
+#endif
+
+/*
+ * Was die laufende Darstellung unten belegt. Gesetzt am Anfang von
+ * render_scene_locked(), gelesen von text_bottom_y() -- die Entscheidung
+ * "Kurzform ja/nein" faellt erst dort, am gemessenen Text.
+ */
+static bool s_render_dots;
+static bool s_render_more;
+static bool s_transcript_active;
+
+/* Unterkante des Texts: ueber allem, was darunter steht. */
 static int32_t text_bottom_y(void)
 {
-    return s_choice_count > 0 ? TEXT_BOTTOM_Y - CHOICE_H - CHOICE_GAP : TEXT_BOTTOM_Y;
+    int32_t y = s_choice_count > 0 ? TEXT_BOTTOM_Y - CHOICE_H - CHOICE_GAP : TEXT_BOTTOM_Y;
+#if UI_WATCH
+    if (s_render_dots) {
+        y -= DOTS_ROW_H;
+    }
+    if (s_render_more) {
+        y -= MORE_H + MORE_GAP;
+    }
+    if (s_transcript_active) {
+        y -= CANCEL_H + CANCEL_GAP + CANCEL_BAR_H + CANCEL_BAR_GAP;
+    }
+#else
+    (void)s_render_dots;
+    (void)s_render_more;
+#endif
+    return y;
 }
 
 static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
@@ -651,10 +780,14 @@ static int32_t text_height(const char *text, const text_step_t *step, int32_t wi
     return size.y;
 }
 
-/* Die groesste Stufe, auf der der Text noch in `room` passt — sonst NULL. */
-static const text_step_t *largest_step_fitting(const char *text, int32_t room, int32_t width)
+/*
+ * Die groesste Stufe zwischen `first` und `last`, auf der der Text noch in
+ * `room` passt — sonst NULL.
+ */
+static const text_step_t *largest_step_fitting(const char *text, int32_t room, int32_t width,
+                                               size_t first, size_t last)
 {
-    for (size_t i = 0; i < TEXT_STEP_COUNT; i++) {
+    for (size_t i = first; i <= last && i < TEXT_STEP_COUNT; i++) {
         if (text_height(text, &TEXT_STEPS[i], width) <= room) {
             return &TEXT_STEPS[i];
         }
@@ -685,14 +818,19 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
                                       const char *text, ui_text_kind_t kind)
 {
     const bool with_question = question && question[0];
-    const lv_font_t *status_font = with_question ? UI_FONT_QUESTION : UI_FONT_STATUS;
+    const lv_font_t *status_font = with_question ? question_font() : UI_FONT_STATUS;
     const int32_t full_status_h = with_question ? QUESTION_H : UI_FONT_STATUS->line_height;
     const int32_t status_h = (with_question || (status && status[0])) ? full_status_h : 0;
     const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
     const int32_t room_beside_tecki = text_bottom_y() - top_beside;
 
+    /* Die Auskunft folgt der eingestellten Schriftgroesse, Beiwerk nicht. */
+    const size_t first = kind == UI_TEXT_MESSAGE ? message_first_step() : 0;
+    const size_t last = kind == UI_TEXT_MESSAGE ? message_last_step() : TEXT_STEP_COUNT - 1;
+
     if (kind == UI_TEXT_MESSAGE) {
-        const text_step_t *step = largest_step_fitting(text, room_beside_tecki, COL_W);
+        const text_step_t *step = largest_step_fitting(text, room_beside_tecki, COL_W,
+                                                       first, last);
         if (step) {
             return (text_layout_t){ true, step->font, step->line_space, STATUS_Y_WITH_TECKI,
                                     COL_X, COL_W, status_font, status_h };
@@ -710,13 +848,159 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
      * etwas traegt.
      */
     const int32_t top = STATUS_Y_TEXT_ONLY + full_status_h + TEXT_GAP;
-    const text_step_t *step = largest_step_fitting(text, text_bottom_y() - top, CONTENT_W);
+    const text_step_t *step = largest_step_fitting(text, text_bottom_y() - top, CONTENT_W,
+                                                   first, last);
     if (!step) {
-        step = &TEXT_STEP_SMALLEST;
+        step = &TEXT_STEPS[last];
     }
     return (text_layout_t){ false, step->font, step->line_space, STATUS_Y_TEXT_ONLY,
                             0, CONTENT_W, status_font, full_status_h };
 }
+
+#if UI_WATCH
+/*
+ * Die Kurzform einer Antwort.
+ *
+ * Auf dem Handgelenk liest man eine Antwort im Vorbeigehen; drei, vier Zeilen
+ * in kleiner werdender Schrift sind dort eine Zumutung. Passt die Antwort
+ * nicht in zwei Zeilen der Antwortschrift (der groessten Stufe der
+ * eingestellten Groesse), steht zuerst nur ihr erster Satz da -- bis `.`,
+ * `!` oder `?`, gefolgt von Leerraum oder dem Ende --, hoechstens aber
+ * SHORT_FORM_CHARS Zeichen. Laenger wird an der letzten Wortgrenze davor
+ * gekuerzt und bekommt "..." (die Schriften kennen U+2026 nicht, siehe
+ * ascii_substitute). Ein Satzende zaehlt erst ab SHORT_FORM_MIN_SENTENCE
+ * Byte: "Di. 25.08." oder "Nr. 3" sollen keinen Satz beenden.
+ *
+ * `false`, wenn die Kurzform die ganze Antwort waere -- dann gibt es nichts
+ * "mehr" zu zeigen.
+ */
+#define SHORT_FORM_CHARS 90
+#define SHORT_FORM_MIN_SENTENCE 20
+/* 90 Zeichen Latin-1 sind hoechstens 180 Byte (der Text ist schon bereinigt). */
+#define SHORT_FORM_MAX (SHORT_FORM_CHARS * 2 + 4)
+
+static bool fits_two_lines(const char *text)
+{
+    const text_step_t *step = &TEXT_STEPS[message_first_step()];
+    const int32_t two_lines = 2 * step->font->line_height + step->line_space;
+    return text_height(text, step, CONTENT_W) <= two_lines;
+}
+
+static bool make_short_form(char *out, size_t size, const char *text)
+{
+    const size_t len = strlen(text);
+    size_t i = 0;
+    size_t chars = 0;
+    size_t last_space = 0;
+    size_t cut = 0;
+    bool ellipsis = false;
+
+    while (i < len) {
+        if (chars == SHORT_FORM_CHARS) {
+            /* Zu lang fuer einen Satz: an der letzten Wortgrenze kuerzen. */
+            cut = last_space >= SHORT_FORM_MIN_SENTENCE ? last_space : i;
+            ellipsis = true;
+            break;
+        }
+        const char c = text[i];
+        if ((c == '.' || c == '!' || c == '?') && i + 1 >= SHORT_FORM_MIN_SENTENCE &&
+            (text[i + 1] == ' ' || text[i + 1] == '\n' || text[i + 1] == '\0')) {
+            cut = i + 1;
+            break;
+        }
+        if (c == ' ' || c == '\n') {
+            last_space = i;
+        }
+        /* Ein Zeichen weiter -- nie mitten in ein UTF-8-Zeichen. */
+        i++;
+        while (i < len && ((unsigned char)text[i] & 0xC0) == 0x80) {
+            i++;
+        }
+        chars++;
+    }
+    if (cut == 0) {
+        return false;
+    }
+    /* Steht nach dem Schnitt nur noch Leerraum, ist die Kurzform das Ganze. */
+    size_t rest = cut;
+    while (rest < len && (text[rest] == ' ' || text[rest] == '\n')) {
+        rest++;
+    }
+    if (rest >= len) {
+        return false;
+    }
+    if (ellipsis) {
+        /* "Pool messen, ..." liest sich schlechter als "Pool messen ..." */
+        while (cut > 0 && (text[cut - 1] == ' ' || text[cut - 1] == ',' ||
+                           text[cut - 1] == ':' || text[cut - 1] == ';' ||
+                           text[cut - 1] == '-')) {
+            cut--;
+        }
+    }
+    const size_t tail = ellipsis ? 3 : 0;
+    if (cut + tail + 1 > size) {
+        cut = size - tail - 1;
+        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80) {
+            cut--;
+        }
+    }
+    memcpy(out, text, cut);
+    if (ellipsis) {
+        memcpy(out + cut, "...", 3);
+    }
+    out[cut + tail] = '\0';
+    return true;
+}
+
+/*
+ * Punktreihe fuer Seiten: aktiver Punkt gruen, die anderen gedaempft,
+ * 8 px Durchmesser, 8 px Abstand. Der Kasten waechst mit der Zahl der
+ * Punkte; ausgerichtet wird er einmal beim Anlegen (lv_obj_align merkt sich
+ * die Ausrichtung, eine neue Breite verschiebt ihn also mit).
+ */
+#define DOT_SIZE 8
+#define DOT_GAP 8
+
+void ui_dots_create(ui_dots_t *dots, lv_obj_t *parent)
+{
+    dots->box = lv_obj_create(parent);
+    lv_obj_remove_style_all(dots->box);
+    lv_obj_remove_flag(dots->box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dots->box, DOT_SIZE, DOT_SIZE);
+    for (int i = 0; i < UI_DOTS_MAX; i++) {
+        dots->dot[i] = create_blob(dots->box, DOT_SIZE, DOT_SIZE, lv_color_hex(0x3a4656));
+        lv_obj_set_pos(dots->dot[i], i * (DOT_SIZE + DOT_GAP), 0);
+        lv_obj_add_flag(dots->dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_add_flag(dots->box, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_dots_set(ui_dots_t *dots, uint8_t count, uint8_t active)
+{
+    if (!dots->box) {
+        return;
+    }
+    if (count > UI_DOTS_MAX) {
+        count = UI_DOTS_MAX;
+    }
+    if (count == 0) {
+        lv_obj_add_flag(dots->box, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_width(dots->box, count * DOT_SIZE + (count - 1) * DOT_GAP);
+    for (int i = 0; i < UI_DOTS_MAX; i++) {
+        if (i >= count) {
+            lv_obj_add_flag(dots->dot[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_set_style_bg_color(dots->dot[i],
+                                  i == active ? lv_color_hex(0x2ecc71) : lv_color_hex(0x3a4656),
+                                  0);
+        lv_obj_remove_flag(dots->dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_remove_flag(dots->box, LV_OBJ_FLAG_HIDDEN);
+}
+#endif /* UI_WATCH */
 
 /*
  * Zeigt diese Szene die Uhr?
@@ -872,10 +1156,39 @@ static void render_face_lines_locked(bool visible, const char *event_line)
     }
 }
 
-/* Welche Pose Tecki tatsaechlich zeigt: Stimmung und Nacht vor der Szene. */
+/*
+ * Welche Pose Tecki tatsaechlich zeigt.
+ *
+ * Auf dem Ziffernblatt und in der Bereit-Szene ist Tecki der Statustraeger
+ * der Uhr, mit fester Rangfolge -- das Wichtigere verdeckt das Unwichtigere:
+ *
+ *   1. Update laeuft                 Augen zu, Punkte   (UPDATING)
+ *   2. keine Verbindung zur Bruecke  schaut suchend     (PAIRING)
+ *   3. Akku <= 15 %, ohne Laden      muede              (TIRED)
+ *   4. Stimmung (Antwort, Wischen)   freut sich, schaut (HAPPY, LOOK_*)
+ *   5. Szene (nachts schlaeft er)    wie gehabt
+ *
+ * Die 15 % sind dieselbe Schwelle, ab der das Energiesparen anspringt
+ * (SAVER_AUTO_PERCENT in main.c). Der StickS3 behaelt sein bisheriges
+ * Verhalten: Stimmung, dann Szene.
+ */
+#define TECKI_TIRED_PERCENT 15
+
 static ui_status_icon_scene_t icon_scene_for(ui_status_icon_scene_t scene, bool clock_only)
 {
     if (scene == UI_STATUS_ICON_IDLE || clock_only) {
+#if UI_WATCH
+        if (s_updating) {
+            return UI_STATUS_ICON_UPDATING;
+        }
+        if (!s_link_connected) {
+            return UI_STATUS_ICON_PAIRING;
+        }
+        if (s_battery_percent >= 0 && s_battery_percent <= TECKI_TIRED_PERCENT &&
+            !s_battery_charging) {
+            return UI_STATUS_ICON_TIRED;
+        }
+#endif
         switch (s_mood) {
         case UI_STATUS_MOOD_HAPPY:
             return UI_STATUS_ICON_HAPPY;
@@ -910,6 +1223,27 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     const bool with_clock = clock_scene(scene, s_text_kind);
     const bool clock_only = clock_only_scene(scene, s_text_kind, hint);
+    s_main_clock_shown = with_clock;
+
+    const char *body_text = hint ? hint : "";
+    /*
+     * Was unten steht, bevor gemessen wird: Seitenpunkte im Verlauf, und --
+     * wenn die Antwort nicht in zwei Zeilen passt -- die Kurzform samt
+     * "Tippen fuer mehr". Rueckfragen haben Vorrang: Mit offenen
+     * Antwortflaechen steht immer die ganze Frage da.
+     */
+    s_render_dots = UI_WATCH && !clock_only && s_position_text[0] != '\0';
+    s_render_more = false;
+#if UI_WATCH
+    /* Statisch statt auf dem Stack: gerendert wird auch aus dem Bluetooth-Strang. */
+    static char short_text[SHORT_FORM_MAX];
+    if (!clock_only && s_shortable && !s_expanded && s_choice_count == 0 &&
+        s_text_kind == UI_TEXT_MESSAGE && !fits_two_lines(body_text) &&
+        make_short_form(short_text, sizeof(short_text), body_text)) {
+        body_text = short_text;
+        s_render_more = true;
+    }
+#endif
 
     /*
      * Flaeche und Ecke vor dem Zeichnen: Auf dem Ziffernblatt schrumpft Tecki
@@ -922,7 +1256,6 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                             clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
     ui_status_icons_apply(&s_icons, icon_scene_for(scene, clock_only));
 
-    const char *body_text = hint ? hint : "";
     const char *question_text = (question && question[0] && !clock_only) ? question : "";
     const text_layout_t plan = plan_text_layout(status, question_text, body_text, s_text_kind);
 
@@ -1047,6 +1380,35 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_obj_remove_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN);
     }
 
+#if UI_WATCH
+    /*
+     * Auf der Uhr steht der Platz im Verlauf als Punktreihe unten statt als
+     * "2/5" in der Kopfzeile -- dort steht jetzt die Uhrzeit. Der juengste
+     * Eintrag ist der linke Punkt: Nach links wischen holt, wie beim
+     * Blaettern ueblich, die Seite von rechts herein -- die aeltere.
+     */
+    lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
+    if (s_render_dots && s_history_count > 0 && s_history_cursor >= 0) {
+        ui_dots_set(&s_history_dots, s_history_count, (uint8_t)s_history_cursor);
+    } else {
+        ui_dots_set(&s_history_dots, 0, 0);
+    }
+    if (s_render_more) {
+        lv_obj_align(s_more_btn, LV_ALIGN_TOP_MID, 0,
+                     TEXT_BOTTOM_Y - (s_render_dots ? DOTS_ROW_H : 0) - MORE_H);
+        lv_obj_remove_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_transcript_active && scene == UI_STATUS_ICON_TRANSCRIBING) {
+        lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_cancel_track, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_cancel_track, LV_OBJ_FLAG_HIDDEN);
+    }
+    ui_status_header_refresh_locked();
+#else
     /* Der Platz im Verlauf ("2/5") steht in der sonst leeren Kopfzeile. */
     lv_label_set_text(s_position_label, s_position_text);
     if (s_position_text[0]) {
@@ -1054,6 +1416,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     } else {
         lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
     }
+#endif
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
     const bool error = scene == UI_STATUS_ICON_ERROR;
@@ -1138,10 +1501,43 @@ static void render_current_locked(void)
  * ungueltig melden, die genauso aussieht wie vorher — auf einem Geraet, das
  * seinen Akku in Stunden misst, ist das kein Detail.
  */
+/*
+ * Die kleine Uhrzeit in der Kopfzeile (nur die Uhr). Sie liegt auf
+ * lv_layer_top() und damit auch ueber Karten und Kontrollzentrum, die als
+ * eigene Ebenen auf dem Schirm liegen. Versteckt ist sie, wo die Uhrzeit
+ * ohnehin gross steht (Ziffernblatt, "Koppeln") -- es sei denn, eine dieser
+ * Ebenen deckt die grosse gerade zu -- und bei der Taschenlampe, die den
+ * ganzen Schirm weiss braucht. ui_cards.c und ui_control.c rufen das nach
+ * jedem Ein- und Ausblenden, mit gehaltener Sperre.
+ */
+void ui_status_header_refresh_locked(void)
+{
+#if UI_WATCH
+    if (!s_header_clock) {
+        return;
+    }
+    const bool overlay = ui_cards_visible() || ui_control_visible();
+    if (ui_torch_on() || (!overlay && s_main_clock_shown)) {
+        lv_obj_add_flag(s_header_clock, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    char now[8];
+    format_clock(now, sizeof(now));
+    if (strcmp(now, lv_label_get_text(s_header_clock)) != 0) {
+        lv_label_set_text(s_header_clock, now);
+    }
+    lv_obj_remove_flag(s_header_clock, LV_OBJ_FLAG_HIDDEN);
+#endif
+}
+
 static void clock_tick_cb(lv_timer_t *timer)
 {
     (void)timer;
-    if (!s_ready || !s_clock_label || lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
+    if (!s_ready) {
+        return;
+    }
+    ui_status_header_refresh_locked();
+    if (!s_clock_label || lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
     char now[8];
@@ -1191,6 +1587,73 @@ static void create_status_ui(void)
         lv_obj_set_style_text_font(s_choice_label[i], UI_FONT_STATUS, 0);
         lv_obj_center(s_choice_label[i]);
     }
+
+    /* "Tippen fuer mehr" unter der Kurzform: umrandet, nicht gefuellt -- ein Hinweis. */
+    s_more_btn = lv_obj_create(s_screen);
+    lv_obj_remove_style_all(s_more_btn);
+    lv_obj_remove_flag(s_more_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_more_btn, MORE_W, MORE_H);
+    lv_obj_set_style_radius(s_more_btn, MORE_H / 2, 0);
+    lv_obj_set_style_border_width(s_more_btn, 2, 0);
+    lv_obj_set_style_border_color(s_more_btn, lv_color_hex(0x3a4656), 0);
+    lv_obj_t *more_label = lv_label_create(s_more_btn);
+    lv_label_set_text(more_label, "Tippen für mehr");
+    lv_obj_set_style_text_font(more_label, UI_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(more_label, lv_color_hex(0x9aa3ad), 0);
+    lv_obj_center(more_label);
+    lv_obj_add_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
+
+    /*
+     * Transkript-Szene: "Abbrechen" ueber die volle Breite (abzueglich Rand,
+     * damit die Rundung der unteren Ecken nichts abschneidet) und darueber
+     * der Balken, der die Frist ablaufen laesst.
+     */
+    s_cancel_btn = lv_obj_create(s_screen);
+    lv_obj_remove_style_all(s_cancel_btn);
+    lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_cancel_btn, CONTENT_W - 2 * UI_SCREEN_PAD, CANCEL_H);
+    lv_obj_set_style_radius(s_cancel_btn, CANCEL_H / 2, 0);
+    lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_cancel_btn, lv_color_hex(0x1b2430), 0);
+    lv_obj_set_style_border_width(s_cancel_btn, 3, 0);
+    lv_obj_set_style_border_color(s_cancel_btn, lv_color_hex(0xf97373), 0);
+    lv_obj_align(s_cancel_btn, LV_ALIGN_TOP_MID, 0, TEXT_BOTTOM_Y - CANCEL_H);
+    lv_obj_t *cancel_label = lv_label_create(s_cancel_btn);
+    lv_label_set_text(cancel_label, "Abbrechen");
+    lv_obj_set_style_text_font(cancel_label, UI_FONT_STATUS, 0);
+    lv_obj_set_style_text_color(cancel_label, lv_color_hex(0xf2f2f2), 0);
+    lv_obj_center(cancel_label);
+    lv_obj_add_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+
+    s_cancel_track = lv_obj_create(s_screen);
+    lv_obj_remove_style_all(s_cancel_track);
+    lv_obj_remove_flag(s_cancel_track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_cancel_track, CONTENT_W - 2 * UI_SCREEN_PAD, CANCEL_BAR_H);
+    lv_obj_set_style_radius(s_cancel_track, CANCEL_BAR_H / 2, 0);
+    lv_obj_set_style_bg_opa(s_cancel_track, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_cancel_track, lv_color_hex(0x3a4656), 0);
+    lv_obj_align(s_cancel_track, LV_ALIGN_TOP_MID, 0,
+                 TEXT_BOTTOM_Y - CANCEL_H - CANCEL_GAP - CANCEL_BAR_H);
+    lv_obj_add_flag(s_cancel_track, LV_OBJ_FLAG_HIDDEN);
+    s_cancel_fill = lv_obj_create(s_cancel_track);
+    lv_obj_remove_style_all(s_cancel_fill);
+    lv_obj_set_size(s_cancel_fill, CONTENT_W - 2 * UI_SCREEN_PAD, CANCEL_BAR_H);
+    lv_obj_set_style_radius(s_cancel_fill, CANCEL_BAR_H / 2, 0);
+    lv_obj_set_style_bg_opa(s_cancel_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_cancel_fill, lv_color_hex(0x2ecc71), 0);
+    lv_obj_align(s_cancel_fill, LV_ALIGN_LEFT_MID, 0, 0);
+
+    /* Seitenpunkte des Verlaufs, ganz unten mittig. */
+    ui_dots_create(&s_history_dots, s_screen);
+    lv_obj_align(s_history_dots.box, LV_ALIGN_TOP_MID, 0, TEXT_BOTTOM_Y - DOT_SIZE - 4);
+
+    /* Die kleine Uhrzeit oben mittig; lv_layer_top() kennt keinen Rand, daher + Rand. */
+    s_header_clock = lv_label_create(lv_layer_top());
+    lv_label_set_text(s_header_clock, "--:--");
+    lv_obj_set_style_text_font(s_header_clock, UI_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(s_header_clock, lv_color_hex(0xc9d1d9), 0);
+    lv_obj_align(s_header_clock, LV_ALIGN_TOP_MID, 0, UI_SCREEN_PAD + UI_HEADER_LABEL_Y);
+    lv_obj_add_flag(s_header_clock, LV_OBJ_FLAG_HIDDEN);
 #endif
 
     s_position_label = lv_label_create(s_screen);
@@ -1390,22 +1853,59 @@ static void copy_utf8_display(char *dst, const char *src, size_t size)
     dst[out] = '\0';
 }
 
-static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
-                           const char *question, const char *hint, ui_text_kind_t kind,
-                           const char *position)
+#if UI_WATCH
+static void cancel_bar_anim_cb(void *var, int32_t value)
 {
-    _lock_acquire(&s_lvgl_lock);
+    lv_obj_set_width((lv_obj_t *)var, value);
+}
+#endif
+
+/* Die Transkript-Szene endet mit jeder anderen Szene -- auch ihr Balken. */
+static void end_transcript_locked(void)
+{
+    if (!s_transcript_active) {
+        return;
+    }
+    s_transcript_active = false;
+#if UI_WATCH
+    lv_anim_delete(s_cancel_fill, cancel_bar_anim_cb);
+#endif
+}
+
+/* Alles, was eine Szene ausmacht -- ohne zu zeichnen. Sperre gehalten. */
+static void assign_scene_locked(ui_status_icon_scene_t scene, const char *status,
+                                const char *question, const char *hint, ui_text_kind_t kind,
+                                const char *position, bool shortable)
+{
     s_empty_history_shown = false;
     s_choice_count = 0;
     s_mood = UI_STATUS_MOOD_NONE;
+    s_shortable = shortable;
+    s_expanded = false;
+    end_transcript_locked();
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
     copy_utf8_display(s_question_text, question ? question : "", sizeof(s_question_text));
     copy_utf8_display(s_hint_text, hint ? hint : "", sizeof(s_hint_text));
     strlcpy(s_position_text, position ? position : "", sizeof(s_position_text));
+}
+
+static void set_scene_ex(ui_status_icon_scene_t scene, const char *status,
+                         const char *question, const char *hint, ui_text_kind_t kind,
+                         const char *position, bool shortable)
+{
+    _lock_acquire(&s_lvgl_lock);
+    assign_scene_locked(scene, status, question, hint, kind, position, shortable);
     render_current_locked();
     _lock_release(&s_lvgl_lock);
+}
+
+static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
+                           const char *question, const char *hint, ui_text_kind_t kind,
+                           const char *position)
+{
+    set_scene_ex(scene, status, question, hint, kind, position, false);
 }
 
 /*
@@ -1640,8 +2140,8 @@ void ui_status_set_idle_text(const char *text, const char *question)
     s_history_cursor = -1;
     _lock_release(&s_lvgl_lock);
 
-    set_scene_full(UI_STATUS_ICON_IDLE, "Bereit", question ? question : "", text,
-                   UI_TEXT_MESSAGE, "");
+    set_scene_ex(UI_STATUS_ICON_IDLE, "Bereit", question ? question : "", text,
+                 UI_TEXT_MESSAGE, "", true);
 }
 
 /*
@@ -1712,7 +2212,13 @@ static void browse_step(int dir)
             }
             return;
         }
+#if UI_WATCH
+        /* Leerer Zustand: Tecki schaut zur Seite, der Satz sagt, wie es losgeht. */
+        set_scene(UI_STATUS_ICON_LOOK_LEFT, "Verlauf",
+                  "Noch keine Antwort. Sprechtaste halten und fragen.", UI_TEXT_HINT);
+#else
         set_scene(UI_STATUS_ICON_IDLE, "Verlauf", "Noch keine Antwort", UI_TEXT_HINT);
+#endif
         _lock_acquire(&s_lvgl_lock);
         s_empty_history_shown = true;
         _lock_release(&s_lvgl_lock);
@@ -1745,8 +2251,8 @@ static void browse_step(int dir)
     _lock_release(&s_lvgl_lock);
 
     ESP_LOGD(TAG, "Verlauf %s", position);
-    set_scene_full(UI_STATUS_ICON_IDLE, "Verlauf", question, answer,
-                   UI_TEXT_MESSAGE, position);
+    set_scene_ex(UI_STATUS_ICON_IDLE, "Verlauf", question, answer,
+                 UI_TEXT_MESSAGE, position, true);
 }
 
 void ui_status_browse_history(void)
@@ -1768,6 +2274,148 @@ void ui_status_set_cancelled(void)
 {
     ESP_LOGI(TAG, "abgebrochen");
     set_scene(UI_STATUS_ICON_IDLE, "Abgebrochen", "Nichts gesendet", UI_TEXT_HINT);
+}
+
+/*
+ * Transkript zuerst: Was die Bruecke verstanden hat, steht da, bevor es
+ * ausgefuehrt wird -- mit einer Frist, in der "Abbrechen" es noch aufhaelt.
+ * Die Szene endet mit dem naechsten ui_state (jede andere Szene raeumt sie
+ * weg, end_transcript_locked). Nach Ablauf der Frist bleibt der Text stehen,
+ * nur die Flaeche gilt nicht mehr: Die Bruecke fuehrt dann schon aus.
+ */
+void ui_status_set_transcript(const char *text, uint32_t cancel_ms)
+{
+    if (cancel_ms == 0) {
+        cancel_ms = 2000;
+    } else if (cancel_ms > 10000) {
+        cancel_ms = 10000;
+    }
+    ESP_LOGI(TAG, "Transkript, %u ms zum Abbrechen", (unsigned)cancel_ms);
+    _lock_acquire(&s_lvgl_lock);
+    assign_scene_locked(UI_STATUS_ICON_TRANSCRIBING, "Verstanden", "", text ? text : "",
+                        UI_TEXT_MESSAGE, "", false);
+    s_transcript_active = true;
+    s_transcript_deadline_us = esp_timer_get_time() + (int64_t)cancel_ms * 1000;
+#if UI_WATCH
+    const int32_t full = CONTENT_W - 2 * UI_SCREEN_PAD;
+    lv_anim_delete(s_cancel_fill, cancel_bar_anim_cb);
+    lv_obj_set_width(s_cancel_fill, full);
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, s_cancel_fill);
+    lv_anim_set_values(&anim, full, 0);
+    lv_anim_set_duration(&anim, cancel_ms);
+    lv_anim_set_exec_cb(&anim, cancel_bar_anim_cb);
+    lv_anim_start(&anim);
+#endif
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+}
+
+bool ui_status_transcript_shown(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool shown = s_transcript_active;
+    _lock_release(&s_lvgl_lock);
+    return shown;
+}
+
+bool ui_status_transcript_cancellable(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool ok = s_transcript_active && esp_timer_get_time() < s_transcript_deadline_us;
+    _lock_release(&s_lvgl_lock);
+    return ok;
+}
+
+bool ui_status_transcript_cancel_at(int16_t x, int16_t y)
+{
+#if UI_WATCH
+    bool hit = false;
+    _lock_acquire(&s_lvgl_lock);
+    if (s_transcript_active && esp_timer_get_time() < s_transcript_deadline_us &&
+        !lv_obj_has_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN)) {
+        lv_area_t area;
+        lv_obj_get_coords(s_cancel_btn, &area);
+        hit = x >= area.x1 - UI_HIT_TOLERANCE && x <= area.x2 + UI_HIT_TOLERANCE &&
+              y >= area.y1 - UI_HIT_TOLERANCE && y <= area.y2 + UI_HIT_TOLERANCE;
+    }
+    _lock_release(&s_lvgl_lock);
+    return hit;
+#else
+    (void)x;
+    (void)y;
+    return false;
+#endif
+}
+
+void ui_status_set_transcript_cancelled(void)
+{
+    ESP_LOGI(TAG, "Transkript abgebrochen");
+    set_scene(UI_STATUS_ICON_IDLE, "Abgebrochen", "Nichts ausgeführt", UI_TEXT_HINT);
+}
+
+/*
+ * Tippen auf eine Antwort: Kurzform -> ganze Antwort, ganze Antwort ->
+ * wieder Kurzform. `false`, wenn es dort nichts umzuschalten gibt; dann
+ * entscheidet main.c, was das Tippen sonst tut.
+ */
+bool ui_status_toggle_more(void)
+{
+#if UI_WATCH
+    bool consumed = false;
+    _lock_acquire(&s_lvgl_lock);
+    if (s_render_more) {
+        s_expanded = true;
+        consumed = true;
+    } else if (s_expanded && s_shortable) {
+        s_expanded = false;
+        consumed = true;
+    }
+    if (consumed) {
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+    return consumed;
+#else
+    return false;
+#endif
+}
+
+bool ui_status_choices_open(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool open = s_choice_count > 0;
+    _lock_release(&s_lvgl_lock);
+    return open;
+}
+
+void ui_status_set_font_level(uint8_t level)
+{
+    if (level > 2) {
+        level = 1;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    if (s_font_level != level) {
+        s_font_level = level;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+uint8_t ui_status_font_level(void)
+{
+    return s_font_level;
+}
+
+void ui_status_set_updating(bool updating)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_updating != updating) {
+        s_updating = updating;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
 }
 
 /*
@@ -2008,6 +2656,9 @@ void ui_status_set_recording(uint32_t session_id)
     (void)session_id;
 
     _lock_acquire(&s_lvgl_lock);
+    end_transcript_locked();
+    s_shortable = false;
+    s_expanded = false;
     s_scene = UI_STATUS_ICON_RECORDING;
     s_text_kind = UI_TEXT_HINT;
     strlcpy(s_status_text, "Hört zu", sizeof(s_status_text));
@@ -2032,9 +2683,17 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
          * des Symbols — das Symbol ist weg, die Aussage bleibt.
          */
         s_battery_low = level_percent <= 20;
+        const bool was_tired = s_battery_percent >= 0 &&
+                               s_battery_percent <= TECKI_TIRED_PERCENT && !s_battery_charging;
         s_battery_charging = charging || usb_powered;
+        s_battery_percent = level_percent;
         lv_label_set_text_fmt(s_battery_label, "%d%%", level_percent);
         apply_battery_colour_locked();
+        /* Teckis Statuspose haengt am Akku -- nur bei einem Wechsel neu zeichnen. */
+        const bool tired = level_percent <= TECKI_TIRED_PERCENT && !s_battery_charging;
+        if (UI_WATCH && tired != was_tired) {
+            render_current_locked();
+        }
     }
     _lock_release(&s_lvgl_lock);
 }

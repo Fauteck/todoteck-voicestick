@@ -2,8 +2,26 @@
 
 #include <stdio.h>
 
+#include <string.h>
+
 #include "sdkconfig.h"
 #include "ui_status_internal.h"
+
+/* Namen der Kacheln in `watch_settings.tiles` (docs/protocol.md), in Reihenfolge der Aufzaehlung. */
+static const char *const TILE_NAMES[UI_CONTROL_COUNT] = {
+    "brightness", "silent", "cinema", "saver", "torch", "battery",
+};
+
+/*
+ * Welche Kacheln in welcher Reihenfolge stehen -- eingestellt in der App.
+ * Ohne Einstellung: Lautlos und Helligkeit oben (die zwei, die man am
+ * haeufigsten braucht), dann Kino, Sparen, Lampe, Akku.
+ */
+static uint8_t s_order[UI_CONTROL_COUNT] = {
+    UI_CONTROL_SILENT, UI_CONTROL_BRIGHTNESS, UI_CONTROL_CINEMA,
+    UI_CONTROL_SAVER, UI_CONTROL_TORCH, UI_CONTROL_BATTERY,
+};
+static uint8_t s_order_count = UI_CONTROL_COUNT;
 
 #if CONFIG_VOICE_BOARD_WATCH206
 #include "ui_layout_watch206.h"
@@ -11,6 +29,14 @@
 #define TILE_GAP 12
 #define TILE_COLS 2
 #define TILE_ROWS 3
+/*
+ * Feste Kachelgroesse fuer drei Reihen, auch wenn weniger Kacheln sichtbar
+ * sind: Das Raster fuellt sich von oben, statt zwei Kacheln zu Riesen
+ * aufzublasen. 183 x 134 px (Tabelle in ui_layout_watch206.h).
+ */
+#define TILE_TOP (HEADER_H + 10)
+#define TILE_W ((CONTENT_W - (TILE_COLS - 1) * TILE_GAP) / TILE_COLS)
+#define TILE_H ((CONTENT_H - TILE_TOP - (TILE_ROWS - 1) * TILE_GAP) / TILE_ROWS)
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_tile[UI_CONTROL_COUNT];
@@ -36,15 +62,12 @@ static void create_locked(void)
     lv_obj_set_style_bg_color(s_root, lv_color_hex(0x000000), 0);
     lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
-    const int32_t top = HEADER_H + 10;
-    const int32_t w = (CONTENT_W - (TILE_COLS - 1) * TILE_GAP) / TILE_COLS;
-    const int32_t h = (CONTENT_H - top - (TILE_ROWS - 1) * TILE_GAP) / TILE_ROWS;
     for (int i = 0; i < UI_CONTROL_COUNT; i++) {
         s_tile[i] = lv_obj_create(s_root);
         lv_obj_remove_style_all(s_tile[i]);
-        lv_obj_set_size(s_tile[i], w, h);
-        lv_obj_align(s_tile[i], LV_ALIGN_TOP_LEFT, (i % TILE_COLS) * (w + TILE_GAP),
-                     top + (i / TILE_COLS) * (h + TILE_GAP));
+        lv_obj_remove_flag(s_tile[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(s_tile[i], TILE_W, TILE_H);
+        lv_obj_add_flag(s_tile[i], LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_radius(s_tile[i], 28, 0);
         lv_obj_set_style_bg_opa(s_tile[i], LV_OPA_COVER, 0);
 
@@ -66,6 +89,27 @@ static void create_locked(void)
     lv_obj_set_style_bg_opa(s_torch, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_torch, lv_color_hex(0xffffff), 0);
     lv_obj_add_flag(s_torch, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Kacheln in der eingestellten Reihenfolge ins Raster, die uebrigen weg. */
+static void layout_locked(void)
+{
+    if (!s_root) {
+        return;
+    }
+    bool shown[UI_CONTROL_COUNT] = { false };
+    for (int pos = 0; pos < s_order_count; pos++) {
+        const int tile = s_order[pos];
+        shown[tile] = true;
+        lv_obj_align(s_tile[tile], LV_ALIGN_TOP_LEFT, (pos % TILE_COLS) * (TILE_W + TILE_GAP),
+                     TILE_TOP + (pos / TILE_COLS) * (TILE_H + TILE_GAP));
+        lv_obj_remove_flag(s_tile[tile], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int tile = 0; tile < UI_CONTROL_COUNT; tile++) {
+        if (!shown[tile]) {
+            lv_obj_add_flag(s_tile[tile], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 static void tile_style(int i, bool on, const char *value)
@@ -103,10 +147,12 @@ void ui_control_show(const ui_control_state_t *state)
 #if CONFIG_VOICE_BOARD_WATCH206
     ui_status_lock();
     create_locked();
+    layout_locked();
     render_locked(state);
     s_visible = true;
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_root);
+    ui_status_header_refresh_locked();
     ui_status_unlock();
 #else
     (void)state;
@@ -134,6 +180,7 @@ void ui_control_hide(void)
     if (s_root) {
         lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
+    ui_status_header_refresh_locked();
     ui_status_unlock();
 #endif
 }
@@ -150,14 +197,29 @@ bool ui_control_visible(void)
 int ui_control_tile_at(int16_t x, int16_t y)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
+    /*
+     * Mit Toleranz (UI_HIT_TOLERANCE) ueberlappen sich die Flaechen im
+     * Zwischenraum; es zaehlt die Kachel, deren Mitte naeher liegt.
+     */
     int hit = -1;
+    int32_t best = 0;
     ui_status_lock();
     for (int i = 0; s_visible && i < UI_CONTROL_COUNT; i++) {
+        if (lv_obj_has_flag(s_tile[i], LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
         lv_area_t area;
         lv_obj_get_coords(s_tile[i], &area);
-        if (x >= area.x1 && x <= area.x2 && y >= area.y1 && y <= area.y2) {
+        if (x < area.x1 - UI_HIT_TOLERANCE || x > area.x2 + UI_HIT_TOLERANCE ||
+            y < area.y1 - UI_HIT_TOLERANCE || y > area.y2 + UI_HIT_TOLERANCE) {
+            continue;
+        }
+        const int32_t dx = x - (area.x1 + area.x2) / 2;
+        const int32_t dy = y - (area.y1 + area.y2) / 2;
+        const int32_t distance = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+        if (hit < 0 || distance < best) {
             hit = i;
-            break;
+            best = distance;
         }
     }
     ui_status_unlock();
@@ -181,6 +243,7 @@ void ui_torch_set(bool on)
     } else {
         lv_obj_add_flag(s_torch, LV_OBJ_FLAG_HIDDEN);
     }
+    ui_status_header_refresh_locked();
     ui_status_unlock();
 #else
     (void)on;
@@ -194,4 +257,40 @@ bool ui_torch_on(void)
 #else
     return false;
 #endif
+}
+
+int ui_control_tile_from_name(const char *name)
+{
+    for (int i = 0; i < UI_CONTROL_COUNT; i++) {
+        if (name && strcmp(name, TILE_NAMES[i]) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void ui_control_set_tiles(const uint8_t *tiles, uint8_t count)
+{
+    uint8_t order[UI_CONTROL_COUNT];
+    uint8_t n = 0;
+    bool seen[UI_CONTROL_COUNT] = { false };
+    for (uint8_t i = 0; tiles && i < count && n < UI_CONTROL_COUNT; i++) {
+        if (tiles[i] < UI_CONTROL_COUNT && !seen[tiles[i]]) {
+            seen[tiles[i]] = true;
+            order[n++] = tiles[i];
+        }
+    }
+    if (n == 0) {
+        /* Mindestens eine Kachel -- sonst bliebe die Voreinstellung stehen. */
+        return;
+    }
+    ui_status_lock();
+    memcpy(s_order, order, n);
+    s_order_count = n;
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (s_visible) {
+        layout_locked();
+    }
+#endif
+    ui_status_unlock();
 }

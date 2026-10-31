@@ -39,7 +39,11 @@ LV_FONT_DECLARE(todoteck_clock_64);
 #define CONTENT_W (LCD_H_RES - 2 * UI_SCREEN_PAD)
 #define CONTENT_H (LCD_V_RES - 2 * UI_SCREEN_PAD)
 
-/* Kopfzeile: Verbindungspunkt und Verlaufsposition links, Akku rechts. */
+/*
+ * Kopfzeile: Verbindungspunkt links, die Uhrzeit klein in der Mitte (ausser
+ * auf dem Ziffernblatt und bei der Taschenlampe), Akku rechts. Die Position
+ * im Verlauf steht auf der Uhr als Punktreihe unten, nicht mehr hier.
+ */
 #define HEADER_H 34
 #define UI_DOT_SIZE 14
 #define UI_DOT_Y 12
@@ -117,3 +121,34 @@ LV_FONT_DECLARE(todoteck_clock_64);
  * waere hier die teuerste aller Farben.
  */
 #define UI_DARK_THEME 1
+
+/*
+ * Trefferflaechen der Uhr -- jede tippbare Flaeche, geprueft gegen zwei
+ * Regeln: mindestens 48 px in beiden Richtungen, und kein Mittelpunkt in den
+ * Eckrundungen des Glases (rund UI_HEADER_INSET_X = 34 px von beiden
+ * Raendern, also x < 34 oder x > 376 bei zugleich y < 34 oder y > 468).
+ * Getroffen wird mit mindestens UI_HIT_TOLERANCE Zugabe ringsum; wo sich
+ * zwei Zugaben im Zwischenraum ueberlappen, zaehlt die naehere Mitte.
+ * Koordinaten absolut (Schirm 410 x 502), Mitte als (x, y).
+ *
+ *   Flaeche                Datei / Funktion               Groesse (B x H)   Mitte            Zugabe
+ *   ---------------------  -----------------------------  ----------------  ---------------  ---------
+ *   Auswahl Ja/Nein (1-3)  ui_status.c choice_at          119..378 x 72     y 446; x 75..333 8 / 16
+ *   Abbrechen (Transkript) ui_status.c transcript_cancel  346 x 64          (205, 450)       6
+ *   "Tippen fuer mehr"     ui_status.c toggle_more        280 x 52          (205, 436..456)  ganzer
+ *                                                                                            Schirm
+ *   Kartenzeile  klein     ui_cards.c ui_cards_touch      378 x 48          x 205            6
+ *   Kartenzeile  normal    ui_cards.c ui_cards_touch      378 x 57          x 205            6
+ *   Kartenzeile  gross     ui_cards.c ui_cards_touch      378 x 70          x 205            6
+ *   Rueckgaengig           ui_cards.c ui_cards_touch      240 x 56          (205, 434)       6
+ *   Kachel (2 x 3)         ui_control.c tile_at           183 x 134         x 107 / 302,     6
+ *                                                                           y 127/273/419
+ *   Ziffernblatt: Tippen   main.c handle_touch            ganzer Schirm     --               --
+ *
+ * Die schmalste Flaeche ist die kleine Kartenzeile mit genau 48 px; sie
+ * faellt aus (ROWS_BOTTOM - ROWS_TOP) / 7 - 6 = 382 / 7 - 6. Wer dort eine
+ * achte Zeile will, unterschreitet die Regel. Die Ecken sind ueberall frei:
+ * Selbst die aeusseren Ja/Nein-Flaechen liegen mit x 75 bzw. 333 weit
+ * innerhalb.
+ */
+#define UI_HIT_TOLERANCE 6
