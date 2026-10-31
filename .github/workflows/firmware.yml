@@ -63,7 +63,10 @@ jobs:
           # Zwei Geraete, zwei Bauordner, zwei sdkconfig (siehe
           # firmware/CMakeLists.txt). Der StickS3 behaelt seine Dateinamen,
           # damit die Abholung auf dem Buero-PC und die Bruecke nichts merken.
+          # `set -e`: Scheitert der StickS3-Build, darf der Uhr-Build ihn nicht
+          # uebertoenen -- sonst faellt es erst an der fehlenden Datei auf.
           command: |
+            set -e
             idf.py build
             idf.py -B build-watch206 -DVOICE_BOARD=watch206 build
             mkdir -p ../dist

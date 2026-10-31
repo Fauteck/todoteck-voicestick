@@ -23,12 +23,6 @@ typedef struct {
 } card_list_t;
 
 static const char *const KIND_NAMES[UI_CARD_COUNT] = { "today", "shopping", "switches" };
-static const char *const TITLES[UI_CARD_COUNT] = { "Heute", "Einkauf", "Zuhause" };
-static const char *const EMPTY_HINTS[UI_CARD_COUNT] = {
-    "Heute ist nichts mehr offen.",
-    "Die Einkaufsliste ist leer.",
-    "Keine Schalter eingerichtet.",
-};
 
 /*
  * Die Listen liegen im PSRAM-faehigen Heap nicht -- es sind gut 2,4 KB je
@@ -39,6 +33,13 @@ static card_list_t s_lists[UI_CARD_COUNT];
 
 #if CONFIG_VOICE_BOARD_WATCH206
 #include "ui_layout_watch206.h"
+
+static const char *const TITLES[UI_CARD_COUNT] = { "Heute", "Einkauf", "Zuhause" };
+static const char *const EMPTY_HINTS[UI_CARD_COUNT] = {
+    "Heute ist nichts mehr offen.",
+    "Die Einkaufsliste ist leer.",
+    "Keine Schalter eingerichtet.",
+};
 
 /* Zeilen je Seite und ihre Hoehe -- passt unter die Ueberschrift. */
 #define ROWS_PER_PAGE 6
