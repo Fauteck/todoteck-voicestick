@@ -11,6 +11,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/stream_buffer.h"
+#include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "hal/i2s_types.h"
 
 #include "voice_board.h"
@@ -55,7 +58,14 @@ static const audio_codec_data_if_t *s_data_if;
 static const audio_codec_gpio_if_t *s_gpio_if;
 static const audio_codec_if_t *s_codec_if;
 
+static esp_err_t open_output_at(uint32_t sample_rate);
+
 static esp_err_t open_output(void)
+{
+    return open_output_at(TONE_SAMPLE_RATE);
+}
+
+static esp_err_t open_output_at(uint32_t sample_rate)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(TONE_I2S_PORT, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
@@ -63,7 +73,7 @@ static esp_err_t open_output(void)
                         TAG, "create i2s tx channel");
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(TONE_SAMPLE_RATE),
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
@@ -141,7 +151,7 @@ static esp_err_t open_output(void)
         .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
         .channel = 1,
         .channel_mask = I2S_STD_SLOT_LEFT,
-        .sample_rate = TONE_SAMPLE_RATE,
+        .sample_rate = sample_rate,
         .mclk_multiple = 0,
     };
     ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_codec, &sample_cfg) == ESP_CODEC_DEV_OK,
@@ -270,4 +280,172 @@ void audio_tone_play(audio_tone_t tone)
     }
     close_output();
     xSemaphoreGive(s_lock);
+}
+
+
+/* ── Gesprochene Antworten (Uhr) ──────────────────────────────────────────── */
+/*
+ * Die Bruecke schickt die Sprachausgabe des Servers als IMA-ADPCM mit 8 kHz:
+ * vier Bit je Abtastwert, rund 4 KB je Sekunde -- das passt neben allem
+ * anderen durch Bluetooth, und Kodieren wie Dekodieren sind ein paar
+ * Tabellenzugriffe. Opus waere kleiner, aber auf dem Handy umstaendlich zu
+ * erzeugen.
+ *
+ * Die Daten landen in einem Puffer im PSRAM (32 s); eine eigene Task wartet
+ * auf einen kleinen Vorrat, oeffnet dann den Lautsprecher und spielt ab,
+ * waehrend der Rest noch hereinkommt. Toene und Mikrofon teilen sich die
+ * I2S-Leitungen: Waehrend gesprochen wird, faellt ein Ton aus (er nimmt die
+ * Sperre nicht), und eine Aufnahme beendet die Ausgabe vorher
+ * (audio_tone_speech_stop).
+ */
+#define SPEECH_BUFFER_BYTES (128 * 1024)
+/* 0,4 s Vorrat, bevor der Lautsprecher aufgeht -- gegen Stottern am Anfang. */
+#define SPEECH_PREBUFFER_BYTES 1600
+#define SPEECH_CHUNK_BYTES 256
+#define SPEECH_OUT_VOL 85.0f
+
+static StreamBufferHandle_t s_speech_buf;
+static TaskHandle_t s_speech_task;
+static volatile bool s_speech_ended;
+static volatile bool s_speech_stop;
+static volatile bool s_speech_active;
+static volatile uint32_t s_speech_rate = 8000;
+
+static const int16_t ADPCM_STEPS[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+    253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+    3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+    12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+};
+static const int8_t ADPCM_INDEX[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
+
+typedef struct {
+    int32_t predictor;
+    int32_t index;
+} adpcm_state_t;
+
+static int16_t adpcm_decode_nibble(adpcm_state_t *st, uint8_t nibble)
+{
+    const int32_t step = ADPCM_STEPS[st->index];
+    int32_t diff = step >> 3;
+    if (nibble & 4) diff += step;
+    if (nibble & 2) diff += step >> 1;
+    if (nibble & 1) diff += step >> 2;
+    st->predictor += (nibble & 8) ? -diff : diff;
+    if (st->predictor > 32767) st->predictor = 32767;
+    if (st->predictor < -32768) st->predictor = -32768;
+    st->index += ADPCM_INDEX[nibble & 0x0F];
+    if (st->index < 0) st->index = 0;
+    if (st->index > 88) st->index = 88;
+    return (int16_t)st->predictor;
+}
+
+static void speech_task(void *arg)
+{
+    (void)arg;
+    uint8_t chunk[SPEECH_CHUNK_BYTES];
+    int16_t pcm[SPEECH_CHUNK_BYTES * 2];
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Vorrat abwarten -- oder das Ende, wenn die Antwort kuerzer ist. */
+        while (!s_speech_stop && !s_speech_ended &&
+               xStreamBufferBytesAvailable(s_speech_buf) < SPEECH_PREBUFFER_BYTES) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (s_speech_stop || xSemaphoreTake(s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            xStreamBufferReset(s_speech_buf);
+            s_speech_active = false;
+            continue;
+        }
+        adpcm_state_t st = { 0, 0 };
+        esp_err_t err = open_output_at(s_speech_rate);
+        if (err == ESP_OK) {
+            (void)esp_codec_dev_set_out_vol(s_codec, SPEECH_OUT_VOL);
+            ESP_LOGI(TAG, "Sprachausgabe startet (%u Hz)", (unsigned)s_speech_rate);
+            while (!s_speech_stop) {
+                const size_t n = xStreamBufferReceive(s_speech_buf, chunk, sizeof(chunk),
+                                                      pdMS_TO_TICKS(400));
+                if (n == 0) {
+                    if (s_speech_ended && xStreamBufferIsEmpty(s_speech_buf)) {
+                        break;
+                    }
+                    continue; /* Daten verspaeten sich: weiter warten */
+                }
+                for (size_t i = 0; i < n; i++) {
+                    pcm[2 * i] = adpcm_decode_nibble(&st, chunk[i] & 0x0F);
+                    pcm[2 * i + 1] = adpcm_decode_nibble(&st, chunk[i] >> 4);
+                }
+                if (esp_codec_dev_write(s_codec, pcm, n * 2 * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+                    break;
+                }
+            }
+        } else {
+            ESP_LOGW(TAG, "Sprachausgabe: Lautsprecher nicht verfuegbar: %s", esp_err_to_name(err));
+        }
+        close_output();
+        xSemaphoreGive(s_lock);
+        xStreamBufferReset(s_speech_buf);
+        s_speech_active = false;
+        ESP_LOGI(TAG, "Sprachausgabe beendet");
+    }
+}
+
+esp_err_t audio_tone_speech_begin(uint32_t sample_rate)
+{
+    if (!s_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_speech_buf) {
+        s_speech_buf = xStreamBufferCreateWithCaps(SPEECH_BUFFER_BYTES, 1,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_RETURN_ON_FALSE(s_speech_buf, ESP_ERR_NO_MEM, TAG, "speech buffer");
+        BaseType_t ok = xTaskCreate(speech_task, "speech", 4096, NULL, 4, &s_speech_task);
+        ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "speech task");
+    }
+    if (s_speech_active) {
+        /* Eine neue Antwort loest die alte ab. */
+        audio_tone_speech_stop();
+    }
+    s_speech_rate = (sample_rate >= 8000 && sample_rate <= 16000) ? sample_rate : 8000;
+    s_speech_stop = false;
+    s_speech_ended = false;
+    s_speech_active = true;
+    xTaskNotifyGive(s_speech_task);
+    return ESP_OK;
+}
+
+void audio_tone_speech_feed(const uint8_t *data, size_t len)
+{
+    if (!s_speech_buf || !s_speech_active || !data || len == 0) {
+        return;
+    }
+    /* Nie blockieren: das ruft der Bluetooth-Strang. Ein voller Puffer verliert. */
+    const size_t sent = xStreamBufferSend(s_speech_buf, data, len, 0);
+    if (sent < len) {
+        ESP_LOGW(TAG, "Sprachpuffer voll, %u Byte verworfen", (unsigned)(len - sent));
+    }
+}
+
+void audio_tone_speech_end(void)
+{
+    s_speech_ended = true;
+}
+
+void audio_tone_speech_stop(void)
+{
+    if (!s_speech_active) {
+        return;
+    }
+    s_speech_stop = true;
+    /* Bis zu einer halben Sekunde warten, bis der Lautsprecher frei ist. */
+    for (int i = 0; i < 50 && s_speech_active; i++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+bool audio_tone_speech_active(void)
+{
+    return s_speech_active;
 }

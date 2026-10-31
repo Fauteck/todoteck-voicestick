@@ -7,7 +7,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 #include "stick_s3_board.h"
+#include "voice_board.h"
 
 static const char *TAG = "wrist_wake";
 
@@ -59,7 +61,43 @@ typedef struct {
     float x, y, z;
 } vec3_t;
 
+/*
+ * Der Sensor hinter der Geste. Der Algorithmus unten ist fuer beide Geraete
+ * derselbe; was wechselt, sind vier Handgriffe: anlegen, Messung an und aus,
+ * Beschleunigung in g lesen.
+ *
+ *   StickS3   BMI270 (0x68) ueber den Espressif-Treiber.
+ *   Uhr       QMI8658 (0x6B, WHO_AM_I 0x05), direkt ueber vier Register --
+ *             fuer die Beschleunigung allein braucht es keinen Treiber.
+ */
+#if CONFIG_VOICE_BOARD_WATCH206
+#define QMI_ADDR 0x6B
+#define QMI_WHO_AM_I 0x00
+#define QMI_CTRL1 0x02
+#define QMI_CTRL2 0x03
+#define QMI_CTRL7 0x08
+#define QMI_AX_L 0x35
+/* +/-2 g, Low-Power-Modus mit 21 Hz: reicht fuer eine Abfrage alle 100 ms. */
+#define QMI_CTRL2_2G_LP21 0x0D
+#define QMI_LSB_PER_G 16384.0f
+
+static i2c_master_dev_handle_t s_qmi;
+/* Nur ein Zeiger als "ist da"-Marke, damit der Rest der Datei gleich bleibt. */
+static void *s_sensor;
+
+static esp_err_t qmi_write(uint8_t reg, uint8_t value)
+{
+    const uint8_t buf[2] = { reg, value };
+    return i2c_master_transmit(s_qmi, buf, sizeof(buf), 100);
+}
+
+static esp_err_t qmi_read(uint8_t reg, uint8_t *data, size_t len)
+{
+    return i2c_master_transmit_receive(s_qmi, &reg, 1, data, len, 100);
+}
+#else
 static bmi270_handle_t *s_sensor;
+#endif
 static wrist_wake_cb_t s_on_raise;
 static volatile bool s_watching;
 static volatile bool s_measuring;
@@ -106,6 +144,12 @@ static void set_measuring(bool on)
     if (!s_sensor || s_measuring == on) {
         return;
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (qmi_write(QMI_CTRL7, on ? 0x01 : 0x00) != ESP_OK) {
+        ESP_LOGW(TAG, "QMI8658 laesst sich nicht schalten");
+        return;
+    }
+#else
     if (on) {
         const bmi270_config_t config = {
             .acce_odr = BMI270_ACC_ODR_25_HZ,
@@ -121,13 +165,66 @@ static void set_measuring(bool on)
     } else {
         (void)bmi270_stop(s_sensor);
     }
+#endif
     s_measuring = on;
 }
 
 static bool read_acce(vec3_t *out)
 {
+#if CONFIG_VOICE_BOARD_WATCH206
+    uint8_t d[6];
+    if (qmi_read(QMI_AX_L, d, sizeof(d)) != ESP_OK) {
+        return false;
+    }
+    out->x = (float)(int16_t)((d[1] << 8) | d[0]) / QMI_LSB_PER_G;
+    out->y = (float)(int16_t)((d[3] << 8) | d[2]) / QMI_LSB_PER_G;
+    out->z = (float)(int16_t)((d[5] << 8) | d[4]) / QMI_LSB_PER_G;
+    return true;
+#else
     return bmi270_get_acce_data(s_sensor, &out->x, &out->y, &out->z) == ESP_OK;
+#endif
 }
+
+#if CONFIG_VOICE_BOARD_WATCH206
+static esp_err_t sensor_create(void)
+{
+    i2c_master_bus_handle_t bus = voice_board_i2c_bus();
+    if (!bus) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const i2c_device_config_t cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = QMI_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &s_qmi);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t who = 0;
+    err = qmi_read(QMI_WHO_AM_I, &who, 1);
+    if (err == ESP_OK && who != 0x05) {
+        err = ESP_ERR_NOT_FOUND;
+    }
+    /* Adressen fortlaufend, Little Endian; Beschleunigung einstellen, noch aus. */
+    if (err == ESP_OK) {
+        err = qmi_write(QMI_CTRL1, 0x60);
+    }
+    if (err == ESP_OK) {
+        err = qmi_write(QMI_CTRL2, QMI_CTRL2_2G_LP21);
+    }
+    if (err == ESP_OK) {
+        err = qmi_write(QMI_CTRL7, 0x00);
+    }
+    if (err != ESP_OK) {
+        i2c_master_bus_rm_device(s_qmi);
+        s_qmi = NULL;
+        return err;
+    }
+    s_sensor = s_qmi;
+    return ESP_OK;
+}
+#endif
 
 static void wrist_task(void *arg)
 {
@@ -210,6 +307,15 @@ static void wrist_task(void *arg)
 
 esp_err_t wrist_wake_init(wrist_wake_cb_t on_raise)
 {
+#if CONFIG_VOICE_BOARD_WATCH206
+    esp_err_t err = sensor_create();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "QMI8658 nicht ansprechbar (%s) — Handgelenk-Geste entfaellt",
+                 esp_err_to_name(err));
+        s_sensor = NULL;
+        return err;
+    }
+#else
     i2c_master_bus_handle_t bus = stick_s3_board_i2c_bus();
     if (!bus) {
         return ESP_ERR_INVALID_STATE;
@@ -232,18 +338,21 @@ esp_err_t wrist_wake_init(wrist_wake_cb_t on_raise)
         s_sensor = NULL;
         return err;
     }
+#endif
 
     s_on_raise = on_raise;
 
     BaseType_t ok = xTaskCreate(wrist_task, "wrist", 3072, NULL, 2, NULL);
     if (ok != pdPASS) {
         ESP_LOGW(TAG, "Task liess sich nicht anlegen — Handgelenk-Geste entfaellt");
+#if !CONFIG_VOICE_BOARD_WATCH206
         bmi270_delete(s_sensor);
+#endif
         s_sensor = NULL;
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "BMI270 bereit");
+    ESP_LOGI(TAG, "Bewegungssensor bereit");
     return ESP_OK;
 }
 

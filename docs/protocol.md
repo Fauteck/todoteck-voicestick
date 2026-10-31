@@ -35,6 +35,7 @@ Characteristics:
 | `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | host -> StickS3 | write without response |
 | `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | host -> StickS3 | write, write without response |
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> host | notify |
+| `speaker_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` | host -> device (fork) | write without response |
 <!-- /doku-vertrag -->
 
 The desktop app scans for this service and only connects to devices whose `VS-XXXX` ID is present in the local paired-device list. Multiple paired devices may be connected at the same time; audio, state, control, and OTA handling are scoped by CoreBluetooth peripheral identity.
@@ -187,6 +188,76 @@ The desktop helper always includes a `text` field, even for states without text
 content. Firmware may immediately render local physical feedback, such as
 switching Tecki to the recording pose when the primary button starts audio, but
 the app's `ui_state` is the authoritative display state.
+
+### Fork addition: `choices` on `ui_state` and the `choice` state event
+
+When the server asks back (for example "… Soll ich buchen?"), the Todoteck
+bridge adds the possible answers to the `ready` state:
+
+```json
+{"event":"ui_state","state":"ready","text":"12,40 € Bäcker, heute. Soll ich buchen?","choices":["Ja","Nein"]}
+```
+
+At most three, each up to 15 bytes. The Waveshare watch draws them as touch
+areas below the answer; a tap sends
+
+```json
+{"event":"choice","index":0,"text":"Ja"}
+```
+
+and the bridge answers the open question with that text — the same as saying
+it. The StickS3 ignores `choices` and keeps the spoken answer. The next scene
+clears the areas.
+
+### Fork addition: spoken answers on the watch speaker (`speaker_rx`)
+
+The bridge can play the server's spoken answer on the watch instead of the
+phone. Every write to `speaker_rx` starts with a type byte:
+
+| Type | Payload | Meaning |
+| --- | --- | --- |
+| `0x01` | sample rate, u16 little endian (8000) | begin — replaces an answer still playing |
+| `0x02` | IMA-ADPCM, 4 bit per sample, low nibble first | audio |
+| `0x03` | — | end — play what is buffered, then close the speaker |
+| `0x04` | — | abort |
+
+The watch buffers up to 32 s in PSRAM and starts after 0.4 s of audio. It
+ignores `0x01` while recording or in silent mode, and stops playback when a
+recording starts or a palm covers the screen. IMA-ADPCM at 8 kHz is about
+4 KB/s — small enough for BLE next to everything else, and trivial to encode
+on the phone.
+
+### Fork addition: watch face and cards (Waveshare watch)
+
+The bridge keeps the watch face and three cards (`today`, `shopping`,
+`switches`) current. Both are optional; the StickS3 ignores them.
+
+```json
+{"event":"face","lines":["Pool rückspülen · 18:00","12° · Regen"],"event_title":"Zahnarzt","event_start":1793520000}
+{"event":"list","kind":"shopping","rev":7,"part":0,"items":[["Milch",""],["Brot",""]]}
+```
+
+`face` carries up to three lines (40 bytes each) shown under the time, plus the
+next calendar event (UTC seconds). The watch keeps the countdown itself and
+vibrates ten minutes before it starts.
+
+`list` arrives in parts because one write carries about 240 bytes: part `0`
+clears the card, every part appends `[text, aux]` pairs (aux is a time for
+`today`, `"1"`/`"0"` for `switches`). At most 15 entries per card. The watch
+never sees IDs; a tap on a row answers with kind, `rev` and position, and the
+bridge maps it back to the item it sent — a `rev` that no longer matches is
+ignored.
+
+```json
+{"event":"item","kind":"shopping","rev":7,"index":3}
+{"event":"glance_request"}
+```
+
+`{"event":"action"}` is the watch's action button (PWR held for 1.5 s); the
+bridge decides what it does.
+
+`glance_request` asks the bridge to send face and cards now (the watch sends it
+when the cards are opened by swiping up).
 
 ### Fork addition: `question` on `ui_state`
 

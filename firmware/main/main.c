@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -23,6 +24,9 @@
 #include "audio_pipeline.h"
 #include "audio_tone.h"
 #include "voice_board.h"
+#include "esp_ota_ops.h"
+#include "ui_cards.h"
+#include "ui_control.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
@@ -58,7 +62,16 @@ static const char *TAG = "voice_stick";
  * uebrigen Aufrufe (watch(false), prepare_deep_sleep) laufen ohne Sensor
  * folgenlos ins Leere.
  */
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Auf der Waveshare-Uhr ist sie an (10/2026, ausdruecklich gewuenscht): Eine
+ * Uhr, die man zum Ablesen erst antippen muss, ist keine. Der Sensor ist dort
+ * ein QMI8658; die Komponente waehlt ihn selbst.
+ */
+#define WRIST_WAKE_ENABLED 1
+#else
 #define WRIST_WAKE_ENABLED 0
+#endif
 /*
  * Dieselbe Grenze, die der Server zieht (MAX_AUDIO_SECONDS in
  * voiceTurnService.ts). Sie hier zu kennen heisst: der Balken kann sie
@@ -98,6 +111,39 @@ static bool s_recording_pm_locked;
 static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
+/*
+ * Der naechste Termin, wie ihn die Bruecke mit dem Ziffernblatt schickt
+ * (UTC-Sekunden, 0 = keiner) -- und ob fuer ihn schon vibriert wurde. Zehn
+ * Minuten vorher meldet sich die Uhr am Handgelenk, einmal je Termin.
+ */
+/*
+ * Was im Kontrollzentrum der Uhr steht. Im RTC-Speicher, damit es den
+ * Tiefschlaf ueberlebt; nach einem Neustart gilt wieder die Voreinstellung.
+ *
+ *   brightness  0 = Hell, 1 = Mittel (Voreinstellung), 2 = Dunkel
+ *   silent      keine Toene -- die Vibration bleibt, sie ist leise genug
+ *   cinema      Handgelenk weckt nicht, Antworten wecken den Schirm nicht
+ *   saver       Energiesparen: dunkler, frueher gedimmt, keine Geste.
+ *               Schaltet sich unter SAVER_AUTO_PERCENT von selbst ein.
+ */
+static RTC_DATA_ATTR uint8_t s_brightness_level = 1;
+static RTC_DATA_ATTR bool s_silent;
+static RTC_DATA_ATTR bool s_cinema;
+static RTC_DATA_ATTR bool s_saver;
+/* Einmal je Ladezyklus automatisch -- wer es wieder ausschaltet, bleibt dabei. */
+static RTC_DATA_ATTR bool s_saver_auto_done;
+static int s_battery_percent = -1;
+#define SAVER_AUTO_PERCENT 15
+#if CONFIG_VOICE_BOARD_WATCH206
+static const uint8_t BRIGHTNESS_STEPS[3] = { 255, 128, 48 };
+static const char *const BRIGHTNESS_NAMES[3] = { "Hell", "Mittel", "Dunkel" };
+#endif
+/* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
+static bool s_action_fired;
+
+static volatile int64_t s_next_event_start;
+static volatile bool s_event_reminded;
+#define EVENT_REMINDER_LEAD_S (10 * 60)
 /* Erst nach dem Start darf der Akku-Takt die Schlafart umstellen. */
 static bool s_pm_ready;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
@@ -200,6 +246,10 @@ typedef enum {
     APP_EVENT_DEVICE_NAME,
     APP_EVENT_TIME,
     APP_EVENT_WRIST_RAISE,
+    /* Tippen oder Wischen auf dem Schirm der Uhr. */
+    APP_EVENT_TOUCH,
+    /* Langer Druck auf die Blaettertaste der Uhr: die frei belegte Aktion. */
+    APP_EVENT_ACTION,
 } app_event_type_t;
 
 typedef struct {
@@ -227,6 +277,17 @@ typedef struct {
      * die Warteschlange.
      */
     char question[64];
+    /*
+     * Nur bei `ready`: Antwortmoeglichkeiten auf eine Rueckfrage ("Ja",
+     * "Nein"). Die Uhr zeigt sie als Touch-Flaechen; der StickS3 ignoriert
+     * sie und bleibt beim gesprochenen "ja".
+     */
+    char choices[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
+    uint8_t choice_count;
+    /* Nur fuer APP_EVENT_TOUCH. */
+    uint8_t gesture;
+    int16_t touch_x;
+    int16_t touch_y;
 } app_event_t;
 
 static void update_battery_status(void);
@@ -256,10 +317,13 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
 }
 
 static void queue_ui_state_event(const char *state, const char *text,
-                                 const char *question);
+                                 const char *question, const cJSON *choices);
 static void queue_device_name_event(const char *name);
 static void queue_time_event(int64_t epoch, int32_t tz_offset_min);
 static void apply_interaction_mode(interaction_mode_t mode);
+static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
+                                       const char (*choices)[UI_STATUS_CHOICE_LEN],
+                                       uint8_t choice_count);
 
 static bool is_external_powered(void)
 {
@@ -372,7 +436,9 @@ static void restart_display_dim_timer(void)
 
     (void)esp_timer_stop(s_display_dim_timer);
     if (!s_recording && !s_ota_updating) {
-        esp_err_t err = esp_timer_start_once(s_display_dim_timer, DISPLAY_DIM_TIMEOUT_US);
+        /* Beim Sparen nach sechs statt fuenfzehn Sekunden. */
+        esp_err_t err = esp_timer_start_once(s_display_dim_timer,
+                                             s_saver ? 6 * 1000 * 1000ULL : DISPLAY_DIM_TIMEOUT_US);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "start dim timer failed: %s", esp_err_to_name(err));
         }
@@ -396,10 +462,31 @@ static void restart_deep_sleep_timer(void)
     }
 }
 
+/* Helligkeit im wachen Zustand: gewaehlte Stufe, beim Sparen hoechstens "Dunkel". */
+static uint8_t active_brightness(void)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    uint8_t level = BRIGHTNESS_STEPS[s_brightness_level % 3];
+    if (s_saver && level > BRIGHTNESS_STEPS[2]) {
+        level = BRIGHTNESS_STEPS[2];
+    }
+    return level;
+#else
+    return DISPLAY_ACTIVE_BRIGHTNESS;
+#endif
+}
+
+#if WRIST_WAKE_ENABLED
+static bool wrist_wake_allowed(void)
+{
+    return !s_cinema && !s_saver;
+}
+#endif
+
 static void note_activity(void)
 {
     if (s_display_dimmed) {
-        esp_err_t err = ui_status_set_brightness(DISPLAY_ACTIVE_BRIGHTNESS);
+        esp_err_t err = ui_status_set_brightness(active_brightness());
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "restore brightness failed: %s", esp_err_to_name(err));
         } else {
@@ -563,8 +650,42 @@ static void enter_deep_sleep(void)
  * Mikrofon und Lautsprecher haengen am selben Codec und teilen sich die
  * Leitungen. Lieber stumm als eine zerissene Aufnahme.
  */
+/*
+ * Zu jedem Ton ein Vibrationsmuster -- nur auf der Uhr, der StickS3 hat
+ * keinen Motor. Es laeuft auch dann, wenn der Ton ausfaellt (Aufnahmepfad
+ * belegt): Gerade dann ist es die einzige Rueckmeldung.
+ *
+ *   Start      ein kurzer Stoss       "jetzt sprechen"
+ *   Antwort    zwei kurze             "da ist was"
+ *   Fehler     ein langer             "hat nicht geklappt"
+ *   Verworfen  ein ganz kurzer        "nichts passiert"
+ */
+static void haptic_for_tone(audio_tone_t tone)
+{
+    switch (tone) {
+    case AUDIO_TONE_START:
+        voice_board_haptic_pattern(1, 60, 0);
+        break;
+    case AUDIO_TONE_DONE:
+        voice_board_haptic_pattern(2, 50, 90);
+        break;
+    case AUDIO_TONE_ERROR:
+        voice_board_haptic_pattern(1, 300, 0);
+        break;
+    case AUDIO_TONE_CANCEL:
+        voice_board_haptic_pattern(1, 30, 0);
+        break;
+    default:
+        break;
+    }
+}
+
 static void play_tone(audio_tone_t tone)
 {
+    haptic_for_tone(tone);
+    if (s_silent) {
+        return;
+    }
     if (audio_pipeline_is_busy()) {
         ESP_LOGD(TAG, "Ton uebersprungen, Aufnahmepfad belegt");
         return;
@@ -614,6 +735,8 @@ static uint32_t start_recording(void)
      * die I2S-Leitungen, und der Piep ist ohnehin das Signal "jetzt
      * sprechen" — er darf die ersten Silben nicht ueberlappen.
      */
+    /* Spricht die Uhr noch die letzte Antwort, hoert sie jetzt auf -- der Satz des Nutzers geht vor. */
+    audio_tone_speech_stop();
     play_tone(AUDIO_TONE_START);
 
     /*
@@ -651,13 +774,6 @@ static uint32_t start_recording(void)
         ui_status_set_error(meldung);
         return 0;
     }
-
-    /*
-     * Ein kurzer Stoss am Handgelenk, zusaetzlich zum Ton: Draussen oder mit
-     * Kopfhoerern hoert man den Piep nicht, spuert den Motor aber. Beim
-     * StickS3 tut das nichts -- er hat keinen.
-     */
-    voice_board_haptic(60);
 
     s_recording = true;
     s_app_ui_state = APP_UI_STATE_RECORDING;
@@ -752,7 +868,8 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
 }
 #endif
 
-static void queue_ui_state_event(const char *state, const char *text, const char *question)
+static void queue_ui_state_event(const char *state, const char *text, const char *question,
+                                 const cJSON *choices)
 {
     if (!s_app_event_queue) {
         ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
@@ -772,6 +889,19 @@ static void queue_ui_state_event(const char *state, const char *text, const char
     }
     if (question) {
         copy_utf8_clipped(event.question, question, sizeof(event.question));
+    }
+    if (cJSON_IsArray(choices)) {
+        const cJSON *item = NULL;
+        cJSON_ArrayForEach(item, choices) {
+            if (event.choice_count >= UI_STATUS_CHOICES_MAX) {
+                break;
+            }
+            if (cJSON_IsString(item) && item->valuestring[0]) {
+                copy_utf8_clipped(event.choices[event.choice_count], item->valuestring,
+                                  UI_STATUS_CHOICE_LEN);
+                event.choice_count++;
+            }
+        }
     }
     ESP_LOGI(TAG, "queue ui_state state=%s text_len=%u current=%s recording=%d",
              event.state[0] ? event.state : "nil",
@@ -857,6 +987,15 @@ static void browse_button_down_cb(void *button_handle, void *usr_data)
     queue_app_event(APP_EVENT_BROWSE_DOWN);
 }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+static void browse_button_long_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    queue_app_event(APP_EVENT_ACTION);
+}
+#endif
+
 static void browse_button_up_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
@@ -871,15 +1010,146 @@ static void browse_button_up_cb(void *button_handle, void *usr_data)
  * braucht.
  */
 #if CONFIG_VOICE_BOARD_WATCH206
-static void screen_tap_cb(void)
+static void screen_touch_cb(const voice_board_touch_event_t *touch)
 {
-    queue_app_event(APP_EVENT_BROWSE_UP);
+    if (!s_app_event_queue) {
+        return;
+    }
+    app_event_t event = {
+        .type = APP_EVENT_TOUCH,
+        .gesture = (uint8_t)touch->gesture,
+        .touch_x = touch->x,
+        .touch_y = touch->y,
+    };
+    if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "drop touch: app queue full");
+    }
 }
 #endif
 
 static void ble_connection_cb(bool connected)
 {
     queue_app_event(connected ? APP_EVENT_BLE_CONNECTED : APP_EVENT_BLE_DISCONNECTED);
+}
+
+/*
+ * `face`: Zeilen fuer das Ziffernblatt und der naechste Termin.
+ *   {"event":"face","lines":["…","…"],"event_title":"Zahnarzt","event_start":1793520000}
+ * Direkt aus dem Bluetooth-Strang: ui_status nimmt sich die Anzeige-Sperre
+ * selbst, und die Daten sind zu gross fuer die Ereignis-Warteschlange.
+ */
+static void apply_face_command(const cJSON *root)
+{
+    char lines[UI_STATUS_FACE_LINES][UI_STATUS_FACE_LEN] = {{0}};
+    uint8_t count = 0;
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "lines");
+    const cJSON *item = NULL;
+    if (cJSON_IsArray(arr)) {
+        cJSON_ArrayForEach(item, arr) {
+            if (count >= UI_STATUS_FACE_LINES) {
+                break;
+            }
+            if (cJSON_IsString(item) && item->valuestring[0]) {
+                copy_utf8_clipped(lines[count++], item->valuestring, UI_STATUS_FACE_LEN);
+            }
+        }
+    }
+    const cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "event_title");
+    const cJSON *start = cJSON_GetObjectItemCaseSensitive(root, "event_start");
+    const int64_t start_s = cJSON_IsNumber(start) ? (int64_t)start->valuedouble : 0;
+    if (start_s != s_next_event_start) {
+        s_next_event_start = start_s;
+        s_event_reminded = false;
+    }
+    ui_status_set_face((const char (*)[UI_STATUS_FACE_LEN])lines, count,
+                       cJSON_IsString(title) ? title->valuestring : "", start_s);
+}
+
+/*
+ * `list`: eine Karte (Heute, Einkauf, Zuhause), in Teilen, weil eine
+ * Schreiboperation nur gut 240 Byte traegt.
+ *   {"event":"list","kind":"shopping","rev":7,"part":0,"items":[["Milch",""],["Brot",""]]}
+ * Teil 0 leert die Karte; `rev` kommt mit jedem Tippen zurueck, damit die
+ * Bruecke einen Index auf einer veralteten Liste nicht falsch zuordnet.
+ */
+static void apply_list_command(const cJSON *root)
+{
+    const cJSON *kind_item = cJSON_GetObjectItemCaseSensitive(root, "kind");
+    const int kind = ui_cards_kind_from_name(cJSON_IsString(kind_item) ? kind_item->valuestring : "");
+    if (kind < 0) {
+        return;
+    }
+    const cJSON *rev = cJSON_GetObjectItemCaseSensitive(root, "rev");
+    const cJSON *part = cJSON_GetObjectItemCaseSensitive(root, "part");
+    ui_cards_begin_part((ui_card_kind_t)kind, cJSON_IsNumber(rev) ? (uint16_t)rev->valuedouble : 0,
+                        cJSON_IsNumber(part) ? (uint8_t)part->valuedouble : 0);
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
+    const cJSON *entry = NULL;
+    if (cJSON_IsArray(items)) {
+        cJSON_ArrayForEach(entry, items) {
+            const cJSON *text = cJSON_GetArrayItem(entry, 0);
+            const cJSON *aux = cJSON_GetArrayItem(entry, 1);
+            if (cJSON_IsString(text)) {
+                ui_cards_add_item((ui_card_kind_t)kind, text->valuestring,
+                                  cJSON_IsString(aux) ? aux->valuestring : "");
+            }
+        }
+    }
+    ui_cards_commit((ui_card_kind_t)kind);
+}
+
+/*
+ * Zehn Minuten vor dem naechsten Termin: dreimal vibrieren und den Schirm
+ * wecken, auf dem der Countdown steht. Einmal je Termin -- geprueft im
+ * Akku-Takt (alle zehn Sekunden), genauer muss es nicht sein.
+ */
+static void check_event_reminder(void)
+{
+    const int64_t start = s_next_event_start;
+    if (start <= 0 || s_event_reminded) {
+        return;
+    }
+    const int64_t now = (int64_t)time(NULL);
+    if (now >= start - EVENT_REMINDER_LEAD_S && now < start) {
+        s_event_reminded = true;
+        ESP_LOGI(TAG, "Termin in %lld s -> Erinnerung", (long long)(start - now));
+        voice_board_haptic_pattern(3, 120, 150);
+        note_activity();
+        ui_status_show_home();
+    }
+}
+
+/*
+ * Rahmen an `speaker_rx`: die gesprochene Antwort fuer den Lautsprecher der
+ * Uhr (audio_tone_speech_*). Waehrend einer Aufnahme wird nichts angenommen
+ * -- Mikrofon und Lautsprecher teilen sich die I2S-Leitungen.
+ */
+static void ble_speaker_cb(const uint8_t *data, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+    switch (data[0]) {
+    case 0x01: {
+        if (s_recording || s_silent) {
+            return;
+        }
+        const uint32_t rate = len >= 3 ? (uint32_t)(data[1] | (data[2] << 8)) : 8000;
+        (void)audio_tone_speech_begin(rate);
+        break;
+    }
+    case 0x02:
+        audio_tone_speech_feed(data + 1, len - 1);
+        break;
+    case 0x03:
+        audio_tone_speech_end();
+        break;
+    case 0x04:
+        audio_tone_speech_stop();
+        break;
+    default:
+        break;
+    }
 }
 
 static void ble_control_cb(const char *json)
@@ -914,7 +1184,12 @@ static void ble_control_cb(const char *json)
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
-                             cJSON_IsString(question) ? question->valuestring : "");
+                             cJSON_IsString(question) ? question->valuestring : "",
+                             cJSON_GetObjectItemCaseSensitive(root, "choices"));
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "face") == 0) {
+        apply_face_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
+        apply_list_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "interaction_mode") == 0 &&
                cJSON_IsString(mode)) {
         if (strcmp(mode->valuestring, "click_to_talk") == 0) {
@@ -959,6 +1234,13 @@ static uint32_t primary_hold_ms(void)
 
 static void apply_app_ui_state(const char *state, const char *text, const char *question)
 {
+    apply_app_ui_state_choices(state, text, question, NULL, 0);
+}
+
+static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
+                                       const char (*choices)[UI_STATUS_CHOICE_LEN],
+                                       uint8_t choice_count)
+{
     ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
              state ? state : "nil",
              (unsigned)(text ? strlen(text) : 0),
@@ -974,12 +1256,21 @@ static void apply_app_ui_state(const char *state, const char *text, const char *
         /* Traegt die Antwort einen Text, gehoert er aufs Display — bisher
          * wurde er hier verworfen und war damit nur in der App zu sehen. */
         ui_status_set_idle_text(text, question);
+        if (choice_count > 0) {
+            ui_status_set_choices(choices, choice_count);
+        }
         /*
          * Nur bei echtem Inhalt einen Ton: die Bruecke setzt "ready" auch
          * beim Verbinden und nach einer verworfenen, zu kurzen Aufnahme.
          */
         if (text && text[0]) {
             play_tone(AUDIO_TONE_DONE);
+#if CONFIG_VOICE_BOARD_WATCH206
+            /* Tecki freut sich drei Sekunden -- nur auf der Uhr, der StickS3 bleibt wie er ist. */
+            if (choice_count == 0) {
+                ui_status_set_mood(UI_STATUS_MOOD_HAPPY, 3000);
+            }
+#endif
         }
         note_activity();
         voice_ble_request_slow_interval();
@@ -1051,6 +1342,200 @@ static void ble_ota_cb(voice_ble_ota_event_t event, uint32_t written, uint32_t s
         break;
     }
 }
+
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Was ein Finger auf dem Schirm der Uhr ausloest.
+ *
+ *   Tippen auf eine Auswahl ("Ja"/"Nein")  -> die Bruecke beantwortet damit
+ *                                            die offene Rueckfrage
+ *   Tippen sonst                          -> wie die Blaettertaste
+ *   Wischen nach links                     -> eine Antwort zurueck (aelter)
+ *   Wischen nach rechts                    -> eine Antwort vor (neuer)
+ *   Wischen nach unten                     -> zurueck aufs Ziffernblatt
+ *
+ * Ist der Schirm gedimmt, weckt die erste Beruehrung nur: Wer ihn antippt,
+ * um die Uhrzeit zu sehen, will nicht zugleich im Verlauf blaettern.
+ * Waehrend der Aufnahme tut der Schirm nichts -- das Handgelenk liegt dabei
+ * oft am Aermel.
+ */
+static ui_control_state_t control_state(void)
+{
+    return (ui_control_state_t){
+        .brightness = BRIGHTNESS_NAMES[s_brightness_level % 3],
+        .silent = s_silent,
+        .cinema = s_cinema,
+        .saver = s_saver,
+        .battery_percent = s_battery_percent,
+        .charging = s_battery_charging,
+    };
+}
+
+static void apply_brightness_now(void)
+{
+    if (!s_display_dimmed) {
+        (void)ui_status_set_brightness(active_brightness());
+    }
+}
+
+/* Eine Kachel im Kontrollzentrum angetippt. */
+static void handle_control_tile(int tile)
+{
+    switch ((ui_control_tile_t)tile) {
+    case UI_CONTROL_BRIGHTNESS:
+        s_brightness_level = (uint8_t)((s_brightness_level + 1) % 3);
+        apply_brightness_now();
+        break;
+    case UI_CONTROL_SILENT:
+        s_silent = !s_silent;
+        break;
+    case UI_CONTROL_CINEMA:
+        s_cinema = !s_cinema;
+        break;
+    case UI_CONTROL_SAVER:
+        s_saver = !s_saver;
+        apply_brightness_now();
+        break;
+    case UI_CONTROL_TORCH:
+        ui_control_hide();
+        (void)ui_status_set_brightness(255);
+        ui_torch_set(true);
+        return;
+    default:
+        return;
+    }
+    voice_board_haptic_pattern(1, 25, 0);
+    const ui_control_state_t st = control_state();
+    ui_control_update(&st);
+}
+
+/*
+ * Hand aufs Display: alles still. Laufende Aufnahme verwerfen, Ton und
+ * Vibration aus, Schirm dunkel -- wie ein Abdecken bei Apple und Samsung.
+ */
+static void handle_palm(void)
+{
+    audio_tone_speech_stop();
+    if (s_recording) {
+        abort_recording();
+    }
+    ui_torch_set(false);
+    ui_control_hide();
+    ui_cards_hide();
+    ui_status_show_home();
+    (void)ui_status_set_brightness(0);
+    s_display_dimmed = true;
+    ui_status_set_idle_dimmed(true);
+    if (s_display_dim_timer) {
+        (void)esp_timer_stop(s_display_dim_timer);
+    }
+}
+
+static void handle_touch(const app_event_t *event)
+{
+    if (event->gesture == VOICE_BOARD_PALM) {
+        handle_palm();
+        return;
+    }
+    if (ui_torch_on()) {
+        /* Taschenlampe: jede Beruehrung schaltet sie aus. */
+        ui_torch_set(false);
+        apply_brightness_now();
+        note_activity();
+        return;
+    }
+    const bool was_dimmed = s_display_dimmed;
+    note_activity();
+    if (was_dimmed || s_recording) {
+        return;
+    }
+    if (ui_control_visible()) {
+        if (event->gesture == VOICE_BOARD_TAP) {
+            const int tile = ui_control_tile_at(event->touch_x, event->touch_y);
+            if (tile >= 0) {
+                handle_control_tile(tile);
+            }
+        } else if (event->gesture == VOICE_BOARD_SWIPE_UP ||
+                   event->gesture == VOICE_BOARD_SWIPE_DOWN) {
+            ui_control_hide();
+        }
+        return;
+    }
+    /*
+     * Vom oberen Rand nach unten: das Kontrollzentrum -- egal, was gerade
+     * zu sehen ist. Weiter unten angesetzt bleibt "nach unten" das
+     * Zurueck aufs Ziffernblatt.
+     */
+    if (event->gesture == VOICE_BOARD_SWIPE_DOWN && event->touch_y < 80) {
+        ui_cards_hide();
+        const ui_control_state_t st = control_state();
+        ui_control_show(&st);
+        return;
+    }
+    if (ui_cards_visible()) {
+        ui_cards_hit_t hit;
+        const ui_cards_action_t action = ui_cards_touch(event->gesture, event->touch_x,
+                                                        event->touch_y, &hit);
+        if (action == UI_CARDS_ITEM) {
+            if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
+                voice_board_haptic_pattern(1, 40, 0);
+            } else {
+                play_tone(AUDIO_TONE_CANCEL);
+            }
+        } else if (action == UI_CARDS_CLOSE) {
+            ui_status_show_home();
+        }
+        return;
+    }
+    switch ((voice_board_gesture_t)event->gesture) {
+    case VOICE_BOARD_TAP: {
+        char choice[UI_STATUS_CHOICE_LEN];
+        const int index = ui_status_choice_at(event->touch_x, event->touch_y,
+                                              choice, sizeof(choice));
+        if (index < 0) {
+            queue_app_event(APP_EVENT_BROWSE_UP);
+            break;
+        }
+        ESP_LOGI(TAG, "Auswahl %d: %s", index, choice);
+        if (voice_ble_send_choice((uint8_t)index, choice) != ESP_OK) {
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+            break;
+        }
+        voice_board_haptic_pattern(1, 30, 0);
+        apply_app_ui_state("thinking", "", "");
+        break;
+    }
+    case VOICE_BOARD_SWIPE_LEFT:
+        ui_status_browse_history();
+        ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
+        break;
+    case VOICE_BOARD_SWIPE_RIGHT:
+        ui_status_browse_newer();
+        ui_status_set_mood(UI_STATUS_MOOD_LOOK_RIGHT, 1200);
+        break;
+    case VOICE_BOARD_SWIPE_DOWN:
+        ui_status_show_home();
+        break;
+    case VOICE_BOARD_SWIPE_UP:
+        /*
+         * Hoch zu den Karten (Heute, Einkauf, Zuhause). Was dort steht, kam
+         * mit dem letzten Abgleich; die Bitte um einen frischen kostet
+         * nichts und zieht die Karte nach, sobald er da ist.
+         */
+        ui_cards_show(UI_CARD_TODAY);
+        (void)voice_ble_send_glance_request();
+        break;
+    default:
+        break;
+    }
+}
+#else
+static void handle_touch(const app_event_t *event)
+{
+    (void)event;
+}
+#endif
 
 static void app_event_task(void *arg)
 {
@@ -1165,6 +1650,12 @@ static void app_event_task(void *arg)
         case APP_EVENT_BROWSE_UP: {
             ESP_LOGI(TAG, "button browse up");
             note_activity();
+            if (s_action_fired) {
+                /* Das Loslassen nach einem langen Druck gehoert zur Aktion. */
+                s_action_fired = false;
+                s_secondary_down_us = 0;
+                break;
+            }
             const uint32_t secondary_duration_ms = elapsed_button_ms(s_secondary_down_us);
             s_secondary_down_us = 0;
 
@@ -1196,7 +1687,30 @@ static void app_event_task(void *arg)
             break;
         }
         case APP_EVENT_UI_STATE:
-            apply_app_ui_state(event.state, event.text, event.question);
+            apply_app_ui_state_choices(event.state, event.text, event.question,
+                                       (const char (*)[UI_STATUS_CHOICE_LEN])event.choices,
+                                       event.choice_count);
+            break;
+        case APP_EVENT_TOUCH:
+            handle_touch(&event);
+            break;
+        case APP_EVENT_ACTION:
+            /*
+             * Die Aktionstaste: was sie tut, legt die Bruecke fest (ein Satz,
+             * der als Text-Turn geht). Hier nur Rueckmeldung und Weitergabe.
+             */
+            note_activity();
+            s_action_fired = true;
+            if (s_recording) {
+                break;
+            }
+            if (voice_ble_send_action() == ESP_OK) {
+                voice_board_haptic_pattern(2, 40, 60);
+                apply_app_ui_state("thinking", "", "");
+            } else {
+                ui_status_set_not_connected();
+                play_tone(AUDIO_TONE_CANCEL);
+            }
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
@@ -1222,6 +1736,7 @@ static void app_event_task(void *arg)
             /* fall through */
         case APP_EVENT_BATTERY_REFRESH:
             update_battery_status();
+            check_event_reminder();
             break;
         case APP_EVENT_ENTER_DEEP_SLEEP:
             enter_deep_sleep();
@@ -1423,6 +1938,17 @@ static esp_err_t init_buttons(void)
     if (err != ESP_OK) {
         return err;
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    /*
+     * Aktionstaste: PWR lang (Voreinstellung der Komponente, 1,5 s). Kuerzer
+     * als die sechs Sekunden, nach denen der AXP2101 hart ausschaltet.
+     */
+    err = iot_button_register_cb(s_browse_button, BUTTON_LONG_PRESS_START, NULL,
+                                 browse_button_long_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
 
     BaseType_t ok = xTaskCreate(app_event_task, "app_event_task", 4096,
                                 NULL, 6, NULL);
@@ -1440,7 +1966,7 @@ static void display_dim_timer_cb(void *arg)
             ui_status_set_idle_dimmed(true);
 #if WRIST_WAKE_ENABLED
             /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
-            wrist_wake_watch(true);
+            wrist_wake_watch(wrist_wake_allowed());
 #endif
             ESP_LOGI(TAG, "display dimmed after inactivity");
         } else {
@@ -1613,7 +2139,18 @@ static void update_battery_status(void)
                                             (usb_powered != s_usb_powered);
         s_battery_charging = charging;
         s_usb_powered = usb_powered;
+        s_battery_percent = level;
         ui_status_set_battery(level, charging, usb_powered);
+#if CONFIG_VOICE_BOARD_WATCH206
+        if (charging || usb_powered) {
+            s_saver_auto_done = false;
+        } else if (!s_saver && !s_saver_auto_done && level <= SAVER_AUTO_PERCENT) {
+            s_saver = true;
+            s_saver_auto_done = true;
+            ESP_LOGI(TAG, "Akku %d %% -> Energiesparen an", level);
+            apply_brightness_now();
+        }
+#endif
         if (external_power_changed) {
             ESP_LOGI(TAG, "power source changed charging=%d usb=%d",
                      charging, usb_powered);
@@ -1667,12 +2204,13 @@ void app_main(void)
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);
+    voice_ble_set_speaker_callback(ble_speaker_cb);
     voice_ble_set_ota_callback(ble_ota_cb);
     ESP_ERROR_CHECK(init_buttons());
 #if CONFIG_VOICE_BOARD_WATCH206
     {
         /* Ohne Touch bleiben beide Tasten -- kein Grund, nicht zu starten. */
-        esp_err_t touch_err = voice_board_touch_init(screen_tap_cb);
+        esp_err_t touch_err = voice_board_touch_init(screen_touch_cb);
         if (touch_err != ESP_OK) {
             ESP_LOGW(TAG, "Touch nicht bereit: %s", esp_err_to_name(touch_err));
         }
@@ -1685,6 +2223,17 @@ void app_main(void)
         ui_status_set_error("Bluetooth nicht bereit");
     } else {
         ui_status_set_device_name(voice_ble_device_name());
+        /*
+         * Bis hierher gekommen: Anzeige, Board und Bluetooth laufen -- die
+         * Fassung gilt als gut. Ohne diesen Aufruf faellt ein Bootloader mit
+         * Rueckfall (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) beim naechsten
+         * Neustart auf die vorige Fassung zurueck. Ein Abbild, das vorher
+         * abstuerzt, erreicht diese Zeile nie -- genau dann soll er das.
+         */
+        const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
+        if (valid_err != ESP_OK && valid_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "OTA-Fassung nicht bestaetigt: %s", esp_err_to_name(valid_err));
+        }
     }
 
     esp_err_t audio_err = audio_pipeline_init();

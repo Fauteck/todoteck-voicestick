@@ -13,6 +13,10 @@ typedef enum {
     UI_STATUS_ICON_RECORDING,
     UI_STATUS_ICON_TRANSCRIBING,
     UI_STATUS_ICON_ERROR,
+    /* Nur als Stimmung ueber einer Szene (ui_status_set_mood), nie als Szene selbst. */
+    UI_STATUS_ICON_HAPPY,
+    UI_STATUS_ICON_LOOK_LEFT,
+    UI_STATUS_ICON_LOOK_RIGHT,
 } ui_status_icon_scene_t;
 
 #define UI_TECKI_THINK_DOTS 3

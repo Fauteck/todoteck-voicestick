@@ -1,5 +1,6 @@
 #include "voice_board.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -67,7 +68,7 @@ static i2c_master_dev_handle_t s_rtc_dev;
 static i2c_master_dev_handle_t s_touch_dev;
 static esp_timer_handle_t s_motor_timer;
 static SemaphoreHandle_t s_touch_sem;
-static voice_board_tap_cb_t s_tap_cb;
+static voice_board_touch_cb_t s_touch_cb;
 
 static esp_err_t reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *data, size_t len)
 {
@@ -133,11 +134,7 @@ static esp_err_t init_rtc(void)
     return reg_read(s_rtc_dev, RTC_REG_CTRL1, &ctrl1, 1);
 }
 
-static void motor_off_cb(void *arg)
-{
-    (void)arg;
-    gpio_set_level(VOICE_BOARD_PIN_MOTOR, 0);
-}
+static void motor_step_cb(void *arg);
 
 static esp_err_t init_motor(void)
 {
@@ -148,8 +145,8 @@ static esp_err_t init_motor(void)
     ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "motor gpio");
     gpio_set_level(VOICE_BOARD_PIN_MOTOR, 0);
     const esp_timer_create_args_t timer_args = {
-        .callback = motor_off_cb,
-        .name = "motor_off",
+        .callback = motor_step_cb,
+        .name = "motor",
     };
     return esp_timer_create(&timer_args, &s_motor_timer);
 }
@@ -321,15 +318,51 @@ esp_err_t voice_board_rtc_write(int64_t epoch, int32_t tz_offset_min)
 }
 
 /* ── Motor ────────────────────────────────────────────────────────────────── */
+/*
+ * Muster statt Einzelstoss: N Stoesse zu je `on_ms`, dazwischen `off_ms`
+ * Pause. Der Zeitgeber schaltet abwechselnd ein und aus, bis die Zahl
+ * erreicht ist -- ohne Task, ohne Warten im Aufrufer.
+ */
+static volatile uint8_t s_motor_left;   /* noch auszuschaltende Stoesse */
+static volatile uint32_t s_motor_on_ms;
+static volatile uint32_t s_motor_off_ms;
+static volatile bool s_motor_running;
 
-void voice_board_haptic(uint32_t duration_ms)
+static void motor_step_cb(void *arg)
 {
-    if (!s_motor_timer || duration_ms == 0) {
+    (void)arg;
+    if (s_motor_running) {
+        gpio_set_level(VOICE_BOARD_PIN_MOTOR, 0);
+        s_motor_running = false;
+        if (s_motor_left > 0) {
+            s_motor_left--;
+        }
+        if (s_motor_left > 0) {
+            (void)esp_timer_start_once(s_motor_timer, (uint64_t)s_motor_off_ms * 1000ULL);
+        }
+    } else if (s_motor_left > 0) {
+        gpio_set_level(VOICE_BOARD_PIN_MOTOR, 1);
+        s_motor_running = true;
+        (void)esp_timer_start_once(s_motor_timer, (uint64_t)s_motor_on_ms * 1000ULL);
+    }
+}
+
+void voice_board_haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms)
+{
+    if (!s_motor_timer || count == 0 || on_ms == 0) {
         return;
     }
     (void)esp_timer_stop(s_motor_timer);
-    gpio_set_level(VOICE_BOARD_PIN_MOTOR, 1);
-    (void)esp_timer_start_once(s_motor_timer, (uint64_t)duration_ms * 1000ULL);
+    s_motor_left = count;
+    s_motor_on_ms = on_ms;
+    s_motor_off_ms = off_ms ? off_ms : 80;
+    s_motor_running = false;
+    motor_step_cb(NULL);
+}
+
+void voice_board_haptic(uint32_t duration_ms)
+{
+    voice_board_haptic_pattern(1, duration_ms, 0);
 }
 
 /* ── Touch ────────────────────────────────────────────────────────────────── */
@@ -345,57 +378,106 @@ static void IRAM_ATTR touch_isr(void *arg)
     }
 }
 
-static int touch_points(void)
+/*
+ * Fingerzahl und Lage des ersten Fingers. FT3168: 0x02 Zahl der Finger,
+ * 0x03/0x04 X (hohe vier Bits in 0x03), 0x05/0x06 Y. Die Lage ist die des
+ * Displays (das Board-Paket von Waveshare fuehrt den Touch ohne Tausch und
+ * ohne Spiegelung) -- 0..409 quer, 0..501 hoch.
+ * -1: der Baustein antwortet nicht.
+ */
+static int touch_read(int16_t *x, int16_t *y)
 {
-    uint8_t status = 0;
-    if (reg_read(s_touch_dev, TOUCH_REG_TD_STATUS, &status, 1) != ESP_OK) {
+    uint8_t d[5] = {0};
+    if (reg_read(s_touch_dev, TOUCH_REG_TD_STATUS, d, sizeof(d)) != ESP_OK) {
         return -1;
     }
-    return status & 0x0F;
+    const int points = d[0] & 0x0F;
+    if (points > 0) {
+        *x = (int16_t)(((d[1] & 0x0F) << 8) | d[2]);
+        *y = (int16_t)(((d[3] & 0x0F) << 8) | d[4]);
+    }
+    return points;
 }
 
 /*
- * Ein Antippen ist: ein Finger setzt auf und hebt innerhalb von
- * TOUCH_MAX_TAP_MS wieder ab. Gezaehlt wird beim Abheben, nicht beim
- * Aufsetzen -- so loest ein Aermel, der ueber den Schirm streift und liegen
- * bleibt, nichts aus.
+ * Eine Beruehrung wird beim Abheben ausgewertet, nicht beim Aufsetzen --
+ * so loest ein Aermel, der ueber den Schirm streift und liegen bleibt,
+ * nichts aus (TOUCH_MAX_TAP_MS).
  *
- * Gelesen wird ueber I2C erst nach der Unterbrechung; ohne Beruehrung
- * schlaeft die Task also. Ausgewertet wird nur die Fingerzahl, nicht die
- * Lage: Phase 1 kennt auf dem Schirm genau eine Geste.
+ * Wischen oder Tippen entscheidet der Weg zwischen erstem und letztem
+ * Punkt: ab TOUCH_SWIPE_PX in einer Richtung ist es ein Wischen in diese,
+ * darunter ein Tippen an der Stelle, an der der Finger aufsetzte.
  */
+#define TOUCH_SWIPE_PX 60
+
 static void touch_task(void *arg)
 {
     (void)arg;
-    int64_t last_tap_us = 0;
+    int64_t last_event_us = 0;
     while (true) {
         xSemaphoreTake(s_touch_sem, portMAX_DELAY);
         const int64_t down_us = esp_timer_get_time();
         bool seen = false;
+        int max_points = 0;
+        int16_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         while (true) {
-            const int points = touch_points();
-            if (points > 0) {
-                seen = true;
-            } else {
+            int16_t x = 0, y = 0;
+            const int points = touch_read(&x, &y);
+            if (points <= 0) {
                 break;  /* abgehoben -- oder der Baustein antwortet nicht */
             }
+            if (points > max_points) {
+                max_points = points;
+            }
+            if (!seen) {
+                x0 = x;
+                y0 = y;
+                seen = true;
+            }
+            x1 = x;
+            y1 = y;
             vTaskDelay(pdMS_TO_TICKS(TOUCH_POLL_MS));
         }
         const int64_t up_us = esp_timer_get_time();
-        if (seen && up_us - down_us <= TOUCH_MAX_TAP_MS * 1000LL &&
-            up_us - last_tap_us >= TOUCH_DEBOUNCE_US) {
-            last_tap_us = up_us;
-            if (s_tap_cb) {
-                s_tap_cb();
+        /*
+         * Hand aufs Display: mehrere Finger zugleich (eine flache Hand meldet
+         * der FT3168 als zwei oder mehr Punkte), eine Viertelsekunde lang.
+         * Das gilt auch ueber TOUCH_MAX_TAP_MS hinaus -- wer die Uhr
+         * abdeckt, laesst die Hand meist einen Moment liegen.
+         */
+        if (seen && max_points >= 2 && up_us - down_us >= 250 * 1000LL &&
+            up_us - last_event_us >= TOUCH_DEBOUNCE_US) {
+            last_event_us = up_us;
+            voice_board_touch_event_t ev = { .gesture = VOICE_BOARD_PALM, .x = x0, .y = y0 };
+            ESP_LOGI(TAG, "Touch: Hand aufs Display (%d Punkte)", max_points);
+            if (s_touch_cb) {
+                s_touch_cb(&ev);
+            }
+        } else if (seen && up_us - down_us <= TOUCH_MAX_TAP_MS * 1000LL &&
+            up_us - last_event_us >= TOUCH_DEBOUNCE_US) {
+            last_event_us = up_us;
+            const int dx = x1 - x0;
+            const int dy = y1 - y0;
+            voice_board_touch_event_t ev = { .x = x0, .y = y0 };
+            if (abs(dx) >= TOUCH_SWIPE_PX && abs(dx) >= abs(dy)) {
+                ev.gesture = dx < 0 ? VOICE_BOARD_SWIPE_LEFT : VOICE_BOARD_SWIPE_RIGHT;
+            } else if (abs(dy) >= TOUCH_SWIPE_PX) {
+                ev.gesture = dy < 0 ? VOICE_BOARD_SWIPE_UP : VOICE_BOARD_SWIPE_DOWN;
+            } else {
+                ev.gesture = VOICE_BOARD_TAP;
+            }
+            ESP_LOGI(TAG, "Touch %d bei (%d,%d) -> (%d,%d)", (int)ev.gesture, x0, y0, x1, y1);
+            if (s_touch_cb) {
+                s_touch_cb(&ev);
             }
         }
         gpio_intr_enable(VOICE_BOARD_PIN_TOUCH_INT);
     }
 }
 
-esp_err_t voice_board_touch_init(voice_board_tap_cb_t cb)
+esp_err_t voice_board_touch_init(voice_board_touch_cb_t cb)
 {
-    s_tap_cb = cb;
+    s_touch_cb = cb;
 
     const gpio_config_t rst = {
         .pin_bit_mask = 1ULL << VOICE_BOARD_PIN_TOUCH_RST,
@@ -408,7 +490,8 @@ esp_err_t voice_board_touch_init(voice_board_tap_cb_t cb)
     vTaskDelay(pdMS_TO_TICKS(200));
 
     ESP_RETURN_ON_ERROR(add_device(TOUCH_ADDR, &s_touch_dev), TAG, "add ft3168");
-    ESP_RETURN_ON_FALSE(touch_points() >= 0, ESP_ERR_NOT_FOUND, TAG, "ft3168 antwortet nicht");
+    int16_t x = 0, y = 0;
+    ESP_RETURN_ON_FALSE(touch_read(&x, &y) >= 0, ESP_ERR_NOT_FOUND, TAG, "ft3168 antwortet nicht");
 
     s_touch_sem = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(s_touch_sem, ESP_ERR_NO_MEM, TAG, "touch sem");

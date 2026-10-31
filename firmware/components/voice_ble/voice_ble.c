@@ -84,6 +84,16 @@ static const ble_uuid128_t s_ota_rx_uuid =
 static const ble_uuid128_t s_ota_state_uuid =
     BLE_UUID128_INIT(0x05, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+/*
+ * Gesprochene Antworten an den Lautsprecher (Fork, Waveshare-Uhr). Ein Rahmen
+ * beginnt mit einem Typbyte: 0x01 Beginn (+ Abtastrate u16 LE), 0x02 Daten
+ * (IMA-ADPCM), 0x03 Ende, 0x04 Abbruch. Was damit geschieht, entscheidet
+ * main.c ueber voice_ble_set_speaker_callback().
+ */
+static const ble_uuid128_t s_speaker_uuid =
+    BLE_UUID128_INIT(0x06, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static voice_ble_speaker_cb_t s_speaker_cb;
 
 static void start_advertising(void);
 static void stop_advertising(void);
@@ -329,6 +339,34 @@ static int ota_abort(uint32_t transfer_id)
     return 0;
 }
 
+static int speaker_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    uint8_t buffer[520];
+    const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len == 0 || len > sizeof(buffer)) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (ble_hs_mbuf_to_flat(ctxt->om, buffer, len, NULL) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (s_speaker_cb) {
+        s_speaker_cb(buffer, len);
+    }
+    return 0;
+}
+
+void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb)
+{
+    s_speaker_cb = cb;
+}
+
 static int ota_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -472,6 +510,11 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                 .access_cb = notify_access_cb,
                 .val_handle = &s_ota_state_attr_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid = &s_speaker_uuid.u,
+                .access_cb = speaker_access_cb,
+                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {0},
         },
@@ -940,6 +983,45 @@ esp_err_t voice_ble_send_device_info(void)
              "\"pending_confirmation\",\"error\",\"no_speech\"]}",
              version);
     return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_choice(uint8_t index, const char *text)
+{
+    /*
+     * Der Text kommt von der Bruecke selbst ("Ja", "Nein") und geht nur
+     * zurueck. Anfuehrungszeichen und Backslash wuerden das JSON brechen --
+     * sie werden zu Leerzeichen, statt hier einen Escaper zu pflegen.
+     */
+    char clean[32];
+    size_t n = 0;
+    for (const char *p = text ? text : ""; *p && n + 1 < sizeof(clean); p++) {
+        clean[n++] = (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) ? ' ' : *p;
+    }
+    clean[n] = '\0';
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"choice\",\"index\":%u,\"text\":\"%s\"}",
+             (unsigned)index, clean);
+    ESP_LOGI(TAG, "choice %u: %s", (unsigned)index, clean);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index)
+{
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"item\",\"kind\":\"%s\",\"rev\":%u,\"index\":%u}",
+             kind ? kind : "", (unsigned)rev, (unsigned)index);
+    ESP_LOGI(TAG, "item %s rev=%u index=%u", kind ? kind : "", (unsigned)rev, (unsigned)index);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_action(void)
+{
+    return send_state_json("{\"event\":\"action\"}");
+}
+
+esp_err_t voice_ble_send_glance_request(void)
+{
+    return send_state_json("{\"event\":\"glance_request\"}");
 }
 
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)

@@ -30,8 +30,26 @@
 #include "esp_err.h"
 #include "sdkconfig.h"
 
+/* Was der Finger auf dem Schirm getan hat. */
+typedef enum {
+    VOICE_BOARD_TAP,
+    VOICE_BOARD_SWIPE_LEFT,
+    VOICE_BOARD_SWIPE_RIGHT,
+    VOICE_BOARD_SWIPE_UP,
+    VOICE_BOARD_SWIPE_DOWN,
+    /* Flache Hand auf dem Schirm: alles still. */
+    VOICE_BOARD_PALM,
+} voice_board_gesture_t;
+
+typedef struct {
+    voice_board_gesture_t gesture;
+    /* Wo der Finger aufsetzte, in Display-Koordinaten (wie LVGL sie sieht). */
+    int16_t x;
+    int16_t y;
+} voice_board_touch_event_t;
+
 /* Wird vom Touch-Baustein aus einer eigenen Task gerufen, nie aus einer ISR. */
-typedef void (*voice_board_tap_cb_t)(void);
+typedef void (*voice_board_touch_cb_t)(const voice_board_touch_event_t *event);
 
 #if CONFIG_VOICE_BOARD_WATCH206
 
@@ -113,9 +131,11 @@ esp_err_t voice_board_rtc_write(int64_t epoch, int32_t tz_offset_min);
 
 /* Ein kurzer Stoss des Vibrationsmotors; kehrt sofort zurueck. */
 void voice_board_haptic(uint32_t duration_ms);
+/* `count` Stoesse zu `on_ms`, dazwischen `off_ms` Pause; kehrt sofort zurueck. */
+void voice_board_haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms);
 
-/* Ein Antippen des Schirms -- Finger drauf und wieder weg. */
-esp_err_t voice_board_touch_init(voice_board_tap_cb_t cb);
+/* Tippen und Wischen auf dem Schirm, ausgewertet beim Abheben des Fingers. */
+esp_err_t voice_board_touch_init(voice_board_touch_cb_t cb);
 
 #else /* StickS3 */
 
@@ -173,7 +193,13 @@ static inline esp_err_t voice_board_rtc_write(int64_t epoch, int32_t tz_offset_m
     return ESP_ERR_NOT_SUPPORTED;
 }
 static inline void voice_board_haptic(uint32_t duration_ms) { (void)duration_ms; }
-static inline esp_err_t voice_board_touch_init(voice_board_tap_cb_t cb)
+static inline void voice_board_haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms)
+{
+    (void)count;
+    (void)on_ms;
+    (void)off_ms;
+}
+static inline esp_err_t voice_board_touch_init(voice_board_touch_cb_t cb)
 {
     (void)cb;
     return ESP_ERR_NOT_SUPPORTED;
