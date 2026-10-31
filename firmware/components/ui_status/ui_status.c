@@ -22,11 +22,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
 #include "stick_s3_board.h"
 #include "ui_status_icons.h"
 
+/*
+ * Zwei Geraete, eine Anzeige-Logik. Was beim StickS3 hier als Mass oder
+ * Schrift steht, kommt fuer die Waveshare-Uhr aus ui_layout_watch206.h --
+ * unter denselben Namen. Der Ablauf (Szenen, Verlauf, Ziffernblatt, "passt
+ * der Text?") ist fuer beide derselbe; nur Treiber und Geometrie wechseln.
+ */
+#if CONFIG_VOICE_BOARD_WATCH206
+#define UI_WATCH 1
+#include "ui_display_watch206.h"
+#include "ui_layout_watch206.h"
+#define LCD_BACKLIGHT_DEFAULT 128
+#else
+#define UI_WATCH 0
+#endif
+
 static const char *TAG = "ui_status";
 
+#if !UI_WATCH
 #define LCD_HOST SPI2_HOST
 
 /*
@@ -94,15 +111,18 @@ static const char *TAG = "ui_status";
  * Geraet, das sonst gar nicht aufnimmt, nicht ins Gewicht.
  */
 #define LVGL_DRAW_BUF_LINES 10
+#endif /* !UI_WATCH */
 #define LVGL_TICK_PERIOD_MS 10
 #define LVGL_TASK_MAX_DELAY_MS 500
 #define LVGL_TASK_MIN_DELAY_MS (1000 / CONFIG_FREERTOS_HZ)
 #define LVGL_TASK_STACK_SIZE (5 * 1024)
 #define LVGL_TASK_PRIORITY 2
 
+#if !UI_WATCH
 #define LCD_BACKLIGHT_LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LCD_BACKLIGHT_LEDC_TIMER LEDC_TIMER_0
 #define LCD_BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
+#endif
 /*
  * Eigene Schriften statt der eingebauten LVGL-Montserrat: die bringen nur
  * ASCII mit, "Rueckspuelen" erschiene also mit Luecken. Diese hier sind mit
@@ -247,6 +267,7 @@ static int8_t s_history_cursor = -1;
  */
 static char s_position_text[12];
 
+#if !UI_WATCH
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
@@ -267,6 +288,7 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t 
     lv_draw_sw_rgb565_swap(px_map, (x2 - x1 + 1) * (y2 - y1 + 1));
     esp_lcd_panel_draw_bitmap(panel, x1, y1, x2 + 1, y2 + 1, px_map);
 }
+#endif /* !UI_WATCH */
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -297,6 +319,25 @@ static lv_obj_t *create_blob(lv_obj_t *parent, int32_t w, int32_t h, lv_color_t 
     return obj;
 }
 
+#if !UI_WATCH
+/*
+ * Kopfzeile und Schriften des StickS3. Die Uhr bringt dieselben Namen in
+ * ui_layout_watch206.h mit.
+ */
+#define UI_SCREEN_PAD 8
+#define UI_DOT_SIZE 8
+#define UI_DOT_Y 6
+#define UI_HEADER_LABEL_Y 4
+#define UI_BATTERY_W 34
+#define UI_POSITION_X 14
+#define UI_FONT_STATUS (&todoteck_font_16)
+#define UI_FONT_QUESTION (&todoteck_font_11)
+#define UI_FONT_SMALL (&todoteck_font_10)
+#define UI_FONT_CLOCK_FACE (&todoteck_clock_64)
+#define UI_FONT_CLOCK_SMALL (&lv_font_montserrat_28)
+#define UI_DARK_THEME 0
+#endif
+
 /*
  * Der Akku steht als Zahl da, nicht als Zeichnung.
  *
@@ -310,11 +351,11 @@ static void create_battery_ui(lv_obj_t *screen)
     s_battery_label = lv_label_create(screen);
     lv_label_set_text(s_battery_label, "--%");
     lv_obj_set_style_text_color(s_battery_label, lv_color_hex(0x675f71), 0);
-    lv_obj_set_style_text_font(s_battery_label, &todoteck_font_10, 0);
+    lv_obj_set_style_text_font(s_battery_label, UI_FONT_SMALL, 0);
     lv_label_set_long_mode(s_battery_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_battery_label, 34);
+    lv_obj_set_width(s_battery_label, UI_BATTERY_W);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, 4);
+    lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, 0, UI_HEADER_LABEL_Y);
 }
 
 /*
@@ -327,6 +368,7 @@ static void create_battery_ui(lv_obj_t *screen)
  * Textzeilen nicht reichen — die Figur allein braucht schon mehr als die
  * Haelfte davon.
  */
+#if !UI_WATCH
 #define CONTENT_W (LCD_H_RES - 16)
 #define CONTENT_H (LCD_V_RES - 16)
 
@@ -341,6 +383,8 @@ static void create_battery_ui(lv_obj_t *screen)
 #define TECKI_BOX UI_TECKI_BOX
 /* Oberkante der Figur in ihrer Spalte. */
 #define TECKI_TOP_Y 35
+/* Tecki steht links in seiner Spalte. */
+#define TECKI_X 0
 #define COL_GAP 10
 /* Linke Kante und Breite der Textspalte neben der Figur. */
 #define COL_X (TECKI_BOX + COL_GAP)
@@ -353,6 +397,7 @@ static void create_battery_ui(lv_obj_t *screen)
 #define METER_X (COL_X + (COL_W - METER_WIDTH) / 2)
 #define METER_LEVEL_Y 74
 #define METER_TIME_Y 86
+#endif /* !UI_WATCH */
 
 /*
  * Zwei Balken, die nur waehrend der Aufnahme sichtbar sind.
@@ -405,10 +450,12 @@ static void create_meters(lv_obj_t *screen)
  * Spalte steht oder ohne ihn ueber die ganze Breite, aendert die Breite —
  * nach unten hat er in beiden Faellen bis zum Rand Platz.
  */
+#if !UI_WATCH
 #define TEXT_BOTTOM_Y (CONTENT_H - 2)
 #define STATUS_Y_WITH_TECKI (HEADER_H + 6)
 #define STATUS_Y_TEXT_ONLY (HEADER_H + 2)
 #define TEXT_GAP 4
+#endif
 
 /*
  * Die Uhr — der Grund, warum das Geraet auch am Handgelenk etwas taugt, wenn
@@ -436,9 +483,11 @@ static void create_meters(lv_obj_t *screen)
  * In "Koppeln" bleibt das Wort stehen: Dass keine Bruecke da ist, sieht man
  * sonst nirgends — und daneben passt die Uhr nur in der kleineren Stufe.
  */
+#if !UI_WATCH
 #define CLOCK_STATUS_Y (HEADER_H + 4)
 #define CLOCK_Y (HEADER_H + 28)
 #define CLOCK_HINT_Y (CONTENT_H - 22)
+#endif
 
 /*
  * Das Ziffernblatt (Bereit und Ruht) — die Anzeige, die das Geraet die meiste
@@ -458,6 +507,9 @@ static void create_meters(lv_obj_t *screen)
  * 189 von 224 Pixeln; das haelt auch die schmalste Stelle aus. Die Ziffern
  * sind darin 47 Pixel hoch statt 35 wie bisher in Montserrat 48.
  */
+#if !UI_WATCH
+/* Untere linke Ecke; die Uhr setzt Tecki stattdessen unten mittig. */
+#define CLOCK_FACE_TECKI_X 0
 #define CLOCK_FACE_TECKI_Y (CONTENT_H - UI_TECKI_BOX_SMALL)
 /*
  * Mittig zwischen Kopfzeile und Unterkante: (103 - 47) / 2 = 28 unter der
@@ -469,6 +521,7 @@ static void create_meters(lv_obj_t *screen)
 #define CLOCK_FACE_Y (HEADER_H + 28)
 /* Wie oft die Anzeige nachzieht. Sekunden zeigt sie nicht, Minuten genuegen. */
 #define CLOCK_TICK_MS 10000
+#endif /* !UI_WATCH */
 
 /*
  * Die Schriftleiter fuer den unteren Text, von gross nach klein.
@@ -493,6 +546,9 @@ typedef struct {
     int32_t line_space;
 } text_step_t;
 
+#if UI_WATCH
+static const text_step_t TEXT_STEPS[] = UI_TEXT_STEPS_INIT;
+#else
 static const text_step_t TEXT_STEPS[] = {
     { &todoteck_font_16, 2 },
     { &todoteck_font_14, 1 },
@@ -501,6 +557,7 @@ static const text_step_t TEXT_STEPS[] = {
     { &todoteck_font_11, 1 },
     { &todoteck_font_10, 2 },
 };
+#endif
 
 #define TEXT_STEP_COUNT (sizeof(TEXT_STEPS) / sizeof(TEXT_STEPS[0]))
 /* Die kleinste Stufe: Rueckfall, wenn selbst sie ueberlaeuft. */
@@ -533,9 +590,11 @@ typedef struct {
  * den ganzen Satz, und genau der macht einen Verlaufseintrag
  * wiedererkennbar.
  */
+#if !UI_WATCH
 #define QUESTION_LINES 2
 #define QUESTION_LINE_SPACE 1
-#define QUESTION_H (QUESTION_LINES * todoteck_font_11.line_height + \
+#endif
+#define QUESTION_H (QUESTION_LINES * UI_FONT_QUESTION->line_height + \
                     (QUESTION_LINES - 1) * QUESTION_LINE_SPACE)
 
 static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
@@ -580,8 +639,8 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
                                       const char *text, ui_text_kind_t kind)
 {
     const bool with_question = question && question[0];
-    const lv_font_t *status_font = with_question ? &todoteck_font_11 : &todoteck_font_16;
-    const int32_t full_status_h = with_question ? QUESTION_H : todoteck_font_16.line_height;
+    const lv_font_t *status_font = with_question ? UI_FONT_QUESTION : UI_FONT_STATUS;
+    const int32_t full_status_h = with_question ? QUESTION_H : UI_FONT_STATUS->line_height;
     const int32_t status_h = (with_question || (status && status[0])) ? full_status_h : 0;
     const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
     const int32_t room_beside_tecki = TEXT_BOTTOM_Y - top_beside;
@@ -707,7 +766,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      */
     ui_status_icons_set_box(&s_icons,
                             clock_only ? UI_TECKI_BOX_SMALL : UI_TECKI_BOX,
-                            0, clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
+                            clock_only ? CLOCK_FACE_TECKI_X : TECKI_X,
+                            clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
     ui_status_icons_apply(&s_icons, scene);
 
     const char *body_text = hint ? hint : "";
@@ -755,7 +815,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         format_clock(clock_text, sizeof(clock_text));
         lv_label_set_text(s_clock_label, clock_text);
         lv_obj_set_style_text_font(s_clock_label,
-                                   clock_only ? &todoteck_clock_64 : &lv_font_montserrat_28, 0);
+                                   clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
         lv_obj_set_width(s_clock_label, clock_only ? CONTENT_W : plan.width);
         lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, clock_only ? 0 : plan.x,
                      clock_only ? CLOCK_FACE_Y : CLOCK_Y);
@@ -820,10 +880,22 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_obj_add_flag(s_time_track, LV_OBJ_FLAG_HIDDEN);
     }
 
+#if UI_DARK_THEME
+    /*
+     * AMOLED: immer schwarzer Grund. "Ruht" unterscheidet sich nur noch
+     * durch gedaempfte Schrift -- ein dunkles Blau kostete hier Strom, ohne
+     * etwas zu sagen, was die geschlossenen Augen nicht schon sagen.
+     */
+    lv_color_t bg = lv_color_hex(0x000000);
+    lv_color_t text = resting ? lv_color_hex(0xa8bad2) : lv_color_hex(0xf2f2f2);
+    lv_color_t muted = resting ? lv_color_hex(0x6f7f95) : lv_color_hex(0x9aa3ad);
+    lv_color_t hint_color = resting ? lv_color_hex(0xa8bad2) : muted;
+#else
     lv_color_t bg = resting ? lv_color_hex(0x1b2430) : lv_color_hex(0xfff7ed);
     lv_color_t text = resting ? lv_color_hex(0xe8eef7) : lv_color_hex(0x3f3440);
     lv_color_t muted = resting ? lv_color_hex(0xa8bad2) : lv_color_hex(0x7f7180);
     lv_color_t hint_color = resting ? lv_color_hex(0xdfe9f8) : muted;
+#endif
     /*
      * Gefuellt gruen heisst verbunden, ein leerer Ring heisst getrennt — der
      * Unterschied ist auch am Handgelenk und aus dem Augenwinkel zu sehen,
@@ -897,10 +969,10 @@ static void create_status_ui(void)
     s_screen = lv_display_get_screen_active(s_display);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0xfff7ed), 0);
     lv_obj_set_style_text_color(s_screen, lv_color_hex(0x3f3440), 0);
-    lv_obj_set_style_pad_all(s_screen, 8, 0);
+    lv_obj_set_style_pad_all(s_screen, UI_SCREEN_PAD, 0);
 
-    s_ble_dot = create_blob(s_screen, 8, 8, lv_color_hex(0x8fb8ff));
-    lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, 0, 6);
+    s_ble_dot = create_blob(s_screen, UI_DOT_SIZE, UI_DOT_SIZE, lv_color_hex(0x8fb8ff));
+    lv_obj_align(s_ble_dot, LV_ALIGN_TOP_LEFT, 0, UI_DOT_Y);
 
     create_battery_ui(s_screen);
     create_meters(s_screen);
@@ -908,9 +980,9 @@ static void create_status_ui(void)
 
     s_position_label = lv_label_create(s_screen);
     lv_label_set_text(s_position_label, "");
-    lv_obj_set_style_text_font(s_position_label, &todoteck_font_10, 0);
+    lv_obj_set_style_text_font(s_position_label, UI_FONT_SMALL, 0);
     lv_obj_set_style_text_color(s_position_label, lv_color_hex(0x7f7180), 0);
-    lv_obj_align(s_position_label, LV_ALIGN_TOP_LEFT, 14, 4);
+    lv_obj_align(s_position_label, LV_ALIGN_TOP_LEFT, UI_POSITION_X, UI_HEADER_LABEL_Y);
     lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
 
     s_status_label = lv_label_create(s_screen);
@@ -924,8 +996,8 @@ static void create_status_ui(void)
      * darunter laufen — plan_text_layout() rechnet mit genau einer Zeile.
      */
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(s_status_label, todoteck_font_16.line_height);
-    lv_obj_set_style_text_font(s_status_label, &todoteck_font_16, 0);
+    lv_obj_set_height(s_status_label, UI_FONT_STATUS->line_height);
+    lv_obj_set_style_text_font(s_status_label, UI_FONT_STATUS, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, COL_W);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -933,7 +1005,7 @@ static void create_status_ui(void)
 
     s_clock_label = lv_label_create(s_screen);
     lv_label_set_text(s_clock_label, "--:--");
-    lv_obj_set_style_text_font(s_clock_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(s_clock_label, UI_FONT_CLOCK_SMALL, 0);
     lv_obj_set_style_text_color(s_clock_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_clock_label, COL_W);
     lv_obj_set_style_text_align(s_clock_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1131,6 +1203,10 @@ static void set_scene(ui_status_icon_scene_t scene, const char *status, const ch
 
 esp_err_t ui_status_init(void)
 {
+#if UI_WATCH
+    lv_init();
+    ESP_RETURN_ON_ERROR(ui_display_watch206_create(&s_display), TAG, "create display");
+#else
     const ledc_timer_config_t backlight_timer = {
         .speed_mode = LCD_BACKLIGHT_LEDC_MODE,
         .duty_resolution = LEDC_TIMER_8_BIT,
@@ -1215,6 +1291,7 @@ esp_err_t ui_status_init(void)
     };
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_register_event_callbacks(io, &callbacks, s_display),
                         TAG, "register lcd callbacks");
+#endif /* UI_WATCH */
 
     const esp_timer_create_args_t tick_timer_args = {
         .callback = lvgl_tick_cb,
@@ -1241,11 +1318,15 @@ esp_err_t ui_status_init(void)
 
 esp_err_t ui_status_set_brightness(uint8_t brightness)
 {
+#if UI_WATCH
+    return ui_display_watch206_set_brightness(brightness);
+#else
     ESP_RETURN_ON_ERROR(ledc_set_duty(LCD_BACKLIGHT_LEDC_MODE,
                                       LCD_BACKLIGHT_LEDC_CHANNEL,
                                       brightness),
                         TAG, "set backlight duty");
     return ledc_update_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL);
+#endif
 }
 
 void ui_status_prepare_deep_sleep(void)
@@ -1253,12 +1334,16 @@ void ui_status_prepare_deep_sleep(void)
     (void)ui_status_set_brightness(0);
 
     _lock_acquire(&s_lvgl_lock);
+#if UI_WATCH
+    ui_display_watch206_sleep();
+#else
     if (s_display) {
         esp_lcd_panel_handle_t panel = lv_display_get_user_data(s_display);
         if (panel) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_disp_on_off(panel, false));
         }
     }
+#endif
     _lock_release(&s_lvgl_lock);
 }
 

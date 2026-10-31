@@ -109,6 +109,22 @@ Which pin carries which role on StickS3:
 Upstream firmware has it the other way round. A host cannot tell and does not
 need to: it sees roles, never pins.
 
+The Waveshare ESP32-S3-Touch-AMOLED-2.06 (`hardware` = `watch_206` in
+`device_info`) speaks the same protocol with its own pins. Its `PWR` button
+reaches the chip through the AXP2101's PWRON line and an inverting transistor,
+so it reads **high** when pressed:
+
+<!-- doku-vertrag:tasten-rollen-uhr -->
+| Role | Button | GPIO | Pressed |
+| --- | --- | --- | --- |
+| `primary` | BOOT | 0 | low |
+| `secondary` | PWR | 10 | high |
+<!-- /doku-vertrag -->
+
+`primary` sits on BOOT because the AXP2101 powers the board off when PWRON is
+held for several seconds, and a recording may last thirty. A tap on the touch
+screen sends the same `secondary` click as the PWR button.
+
 ### Fork addition: `recording_discarded`
 
 The Todoteck fork emits one further state event when a recording is thrown away
@@ -354,6 +370,12 @@ On the device display, OTA switches the normal idle/recording UI into an update 
 
 While OTA is active, the device ignores push-to-talk input and pauses display dimming/deep sleep timers. After a successful transfer, the firmware waits about 500 ms after sending the `done` event and then calls `esp_restart()`.
 The desktop updater can cancel an in-progress transfer by sending `OtaAbortFrame`; the device aborts the OTA handle and keeps booting the current firmware.
+
+Before switching the boot partition, the firmware compares the project name in
+the new image's app description with its own (`voice_stick` on StickS3,
+`voice_watch` on the Waveshare watch, set in `firmware/CMakeLists.txt`). An
+image built for the other device is rejected with
+`{"event":"error","code":"wrong_device",...}` and the running firmware stays.
 
 ## Runtime State Machine
 

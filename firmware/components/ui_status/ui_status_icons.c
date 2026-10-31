@@ -108,7 +108,16 @@ static const float MARK_EYES[2][2] = {
 };
 
 /* ── Farben ───────────────────────────────────────────────────────────────── */
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Die Uhr zeigt jede Szene auf schwarzem Grund (AMOLED, siehe
+ * ui_layout_watch206.h). Das dunklere Gruen ist nur fuer Creme da; auf
+ * Schwarz gilt ueberall das Marken-Gruen.
+ */
+#define COL_MARK_LIGHT 0x2ecc71
+#else
 #define COL_MARK_LIGHT 0x1e9e56 /* auf cremeweissem Grund */
+#endif
 #define COL_MARK_DARK  0x2ecc71 /* auf dunklem Grund im Ruhezustand */
 #define COL_MARK_ERROR 0xe74c3c /* 3,60:1 auf Creme, reicht */
 #define COL_EYE_LIGHT  0xffffff

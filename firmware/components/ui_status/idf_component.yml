@@ -1,2 +1,5 @@
 dependencies:
   lvgl/lvgl: "9.2.0"
+  # Treiber fuer den CO5300 der Waveshare-Uhr (gleicher Befehlssatz wie der
+  # SH8601). Im StickS3-Abbild wird er mitgebaut, aber nicht gelinkt.
+  espressif/esp_lcd_sh8601: "^2.0.1"

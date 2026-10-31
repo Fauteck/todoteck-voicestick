@@ -13,7 +13,7 @@
 #include "freertos/semphr.h"
 #include "hal/i2s_types.h"
 
-#include "stick_s3_board.h"
+#include "voice_board.h"
 
 static const char *TAG = "audio_tone";
 
@@ -67,11 +67,11 @@ static esp_err_t open_output(void)
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
-            .mclk = STICK_S3_PIN_ES8311_MCLK,
-            .bclk = STICK_S3_PIN_ES8311_BCLK,
-            .ws = STICK_S3_PIN_ES8311_LRCK,
-            .dout = STICK_S3_PIN_ES8311_DIN,
-            .din = STICK_S3_PIN_ES8311_DOUT,
+            .mclk = VOICE_BOARD_PIN_I2S_MCLK,
+            .bclk = VOICE_BOARD_PIN_I2S_BCLK,
+            .ws = VOICE_BOARD_PIN_I2S_WS,
+            .dout = VOICE_BOARD_PIN_I2S_DOUT,
+            .din = VOICE_BOARD_PIN_I2S_DIN,
         },
     };
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
@@ -80,7 +80,7 @@ static esp_err_t open_output(void)
                         TAG, "init i2s tx");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_handle), TAG, "enable i2s tx");
 
-    i2c_master_bus_handle_t i2c_bus = stick_s3_board_i2c_bus();
+    i2c_master_bus_handle_t i2c_bus = voice_board_i2c_bus();
     ESP_RETURN_ON_FALSE(i2c_bus != NULL, ESP_ERR_INVALID_STATE, TAG, "i2c bus unavailable");
 
     audio_codec_i2c_cfg_t i2c_cfg = {
@@ -107,11 +107,14 @@ static esp_err_t open_output(void)
         .gpio_if = s_gpio_if,
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
         /*
-         * Der Verstaerker haengt an der L3B-Schiene des M5PM1, die beim
-         * Start dauerhaft eingeschaltet wird — es gibt keinen eigenen
-         * Enable-Pin, den der Codec-Treiber ziehen koennte.
+         * StickS3: Der Verstaerker haengt an der L3B-Schiene des M5PM1, die
+         * beim Start dauerhaft eingeschaltet wird — es gibt keinen eigenen
+         * Enable-Pin, den der Codec-Treiber ziehen koennte (-1).
+         * Waveshare-Uhr: GPIO46 (PA_CTRL). Den zieht der Treiber beim Oeffnen
+         * hoch und beim Schliessen wieder herunter — der Verstaerker zieht
+         * also nur Strom, waehrend ein Ton laeuft.
          */
-        .pa_pin = -1,
+        .pa_pin = VOICE_BOARD_PIN_PA,
         .pa_reverted = false,
         .master_mode = false,
         .use_mclk = true,

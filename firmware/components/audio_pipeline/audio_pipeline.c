@@ -16,7 +16,7 @@
 #include "hal/i2s_types.h"
 #include "opus.h"
 
-#include "stick_s3_board.h"
+#include "voice_board.h"
 #include "voice_ble.h"
 
 static const char *TAG = "audio_pipeline";
@@ -28,6 +28,16 @@ static const char *TAG = "audio_pipeline";
 #define OPUS_BITRATE 20000
 #define OPUS_MAX_PACKET_SIZE 220
 #define OPUS_COMPLEXITY 1
+/*
+ * Mikrofonverstaerkung. 36 dB am ES8311 des StickS3 sind erprobt; 24 dB am
+ * ES7210 sind der Wert aus den Beispielen von Waveshare und noch nicht am
+ * Handgelenk gemessen.
+ */
+#if VOICE_BOARD_MIC_ES7210
+#define MIC_GAIN_DB 24.0
+#else
+#define MIC_GAIN_DB 36.0
+#endif
 
 #define TX_QUEUE_DEPTH 50
 #define TX_RETRY_DELAY_MS 30
@@ -92,11 +102,11 @@ static esp_err_t init_i2s(void)
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
-            .mclk = STICK_S3_PIN_ES8311_MCLK,
-            .bclk = STICK_S3_PIN_ES8311_BCLK,
-            .ws = STICK_S3_PIN_ES8311_LRCK,
-            .dout = STICK_S3_PIN_ES8311_DIN,
-            .din = STICK_S3_PIN_ES8311_DOUT,
+            .mclk = VOICE_BOARD_PIN_I2S_MCLK,
+            .bclk = VOICE_BOARD_PIN_I2S_BCLK,
+            .ws = VOICE_BOARD_PIN_I2S_WS,
+            .dout = VOICE_BOARD_PIN_I2S_DOUT,
+            .din = VOICE_BOARD_PIN_I2S_DIN,
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -114,12 +124,16 @@ static esp_err_t init_i2s(void)
 
 static esp_err_t init_codec(void)
 {
-    i2c_master_bus_handle_t i2c_bus = stick_s3_board_i2c_bus();
+    i2c_master_bus_handle_t i2c_bus = voice_board_i2c_bus();
     ESP_RETURN_ON_FALSE(i2c_bus != NULL, ESP_ERR_INVALID_STATE, TAG, "i2c bus unavailable");
 
     audio_codec_i2c_cfg_t i2c_cfg = {
         .port = I2C_NUM_1,
+#if VOICE_BOARD_MIC_ES7210
+        .addr = ES7210_CODEC_DEFAULT_ADDR,
+#else
         .addr = ES8311_CODEC_DEFAULT_ADDR,
+#endif
         .bus_handle = i2c_bus,
     };
     s_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
@@ -136,6 +150,20 @@ static esp_err_t init_codec(void)
     s_gpio_if = audio_codec_new_gpio();
     ESP_RETURN_ON_FALSE(s_gpio_if != NULL, ESP_ERR_NO_MEM, TAG, "create codec gpio");
 
+#if VOICE_BOARD_MIC_ES7210
+    /*
+     * Waveshare-Uhr: Die beiden Mikrofone haengen am ES7210, einem reinen
+     * Analog-Digital-Wandler; der ES8311 dort treibt nur den Lautsprecher.
+     * Konfiguriert wie im Board-Paket von Waveshare. Im Standard-I2S-Format
+     * liegt Mikrofon 1 im linken Kanal -- genau der, den dieser Pfad mono
+     * liest. Das zweite Mikrofon (Stoergeraeusch-Abzug) bleibt fuer spaeter.
+     */
+    es7210_codec_cfg_t es7210_cfg = {
+        .ctrl_if = s_ctrl_if,
+    };
+    s_codec_if = es7210_codec_new(&es7210_cfg);
+    ESP_RETURN_ON_FALSE(s_codec_if != NULL, ESP_ERR_NO_MEM, TAG, "create es7210");
+#else
     es8311_codec_cfg_t es8311_cfg = {
         .ctrl_if = s_ctrl_if,
         .gpio_if = s_gpio_if,
@@ -154,6 +182,7 @@ static esp_err_t init_codec(void)
     };
     s_codec_if = es8311_codec_new(&es8311_cfg);
     ESP_RETURN_ON_FALSE(s_codec_if != NULL, ESP_ERR_NO_MEM, TAG, "create es8311");
+#endif
 
     esp_codec_dev_cfg_t dev_cfg = {
         .dev_type = ESP_CODEC_DEV_TYPE_IN,
@@ -172,7 +201,7 @@ static esp_err_t init_codec(void)
     };
     ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_codec, &sample_cfg) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "open codec");
-    ESP_RETURN_ON_FALSE(esp_codec_dev_set_in_gain(s_codec, 36.0) == ESP_CODEC_DEV_OK,
+    ESP_RETURN_ON_FALSE(esp_codec_dev_set_in_gain(s_codec, MIC_GAIN_DB) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "set mic gain");
     return ESP_OK;
 }

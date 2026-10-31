@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "voice_board.h"
 
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
@@ -264,6 +265,30 @@ static int ota_finish(uint32_t transfer_id, uint32_t image_size)
     if (err != ESP_OK) {
         ota_clear_state();
         ota_send_error("end_failed", err);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    /*
+     * Gehoert das Abbild zu diesem Geraet?
+     *
+     * Seit es zwei Geraete gibt, gibt es zwei Abbilder -- voice_stick.bin und
+     * voice_watch.bin --, und beide sind gueltige ESP32-S3-Programme.
+     * esp_ota_end() prueft nur, ob das Abbild heil ist, nicht wofuer es
+     * gebaut wurde. Ein StickS3-Abbild auf der Uhr startet mit falschen Pins:
+     * dunkles Display, kein Mikrofon -- und im schlimmsten Fall kein Weg mehr
+     * zurueck ausser USB. Der Projektname steht in der App-Beschreibung jedes
+     * Abbilds (firmware/CMakeLists.txt setzt ihn je Geraet); weicht er ab,
+     * wird nicht umgeschaltet, und das laufende Abbild bleibt.
+     */
+    esp_app_desc_t incoming;
+    const esp_app_desc_t *running = esp_app_get_description();
+    err = esp_ota_get_partition_description(s_ota.partition, &incoming);
+    if (err != ESP_OK ||
+        strncmp(incoming.project_name, running->project_name, sizeof(incoming.project_name)) != 0) {
+        ESP_LOGE(TAG, "OTA image for '%.32s' rejected, this device runs '%.32s'",
+                 err == ESP_OK ? incoming.project_name : "?", running->project_name);
+        ota_clear_state();
+        ota_send_error("wrong_device", err == ESP_OK ? ESP_ERR_INVALID_VERSION : err);
         return BLE_ATT_ERR_UNLIKELY;
     }
 
@@ -907,7 +932,7 @@ esp_err_t voice_ble_send_device_info(void)
     const char *version = app_desc ? app_desc->version : "unknown";
     char json[280];
     snprintf(json, sizeof(json),
-             "{\"event\":\"device_info\",\"hardware\":\"stick_s3\","
+             "{\"event\":\"device_info\",\"hardware\":\"" VOICE_BOARD_HARDWARE_ID "\","
              "\"firmware_version\":\"%s\","
              "\"buttons\":[\"primary\",\"secondary\"],"
              "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
