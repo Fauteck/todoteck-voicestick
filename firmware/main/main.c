@@ -1074,6 +1074,15 @@ static void app_event_task(void *arg)
                 s_primary_session_id = start_recording();
                 if (s_primary_session_id == 0) {
                     s_primary_down_us = 0;
+                    if (!voice_ble_is_ready() && !s_ota_updating) {
+                        /*
+                         * Keine Bruecke: Bisher geschah dann sichtbar nichts
+                         * -- start_recording() schrieb nur ins Log. Auf der
+                         * Waveshare-Uhr sah das aus wie eine tote Taste.
+                         */
+                        ui_status_set_not_connected();
+                        play_tone(AUDIO_TONE_CANCEL);
+                    }
                     break;
                 }
                 esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK

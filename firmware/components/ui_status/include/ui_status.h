@@ -18,6 +18,8 @@ void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_browse_history(void);
 void ui_status_set_cancelled(void);
 void ui_status_set_press_too_short(void);
+/* Sprechtaste gedrueckt, aber keine Bruecke verbunden -- vorher geschah dann sichtbar nichts. */
+void ui_status_set_not_connected(void);
 void ui_status_set_no_speech(const char *hint);
 void ui_status_set_link(bool connected);
 /* Uhrzeit von der Bruecke: UTC-Sekunden plus Abstand der Ortszeit in Minuten. */

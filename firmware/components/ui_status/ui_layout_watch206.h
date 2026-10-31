@@ -40,12 +40,19 @@ LV_FONT_DECLARE(todoteck_clock_64);
 #define CONTENT_H (LCD_V_RES - 2 * UI_SCREEN_PAD)
 
 /* Kopfzeile: Verbindungspunkt und Verlaufsposition links, Akku rechts. */
-#define HEADER_H 30
+#define HEADER_H 34
 #define UI_DOT_SIZE 14
-#define UI_DOT_Y 8
-#define UI_HEADER_LABEL_Y 4
+#define UI_DOT_Y 12
+#define UI_HEADER_LABEL_Y 8
 #define UI_BATTERY_W 70
-#define UI_POSITION_X 24
+/*
+ * Die Ecken des Glases sind stark gerundet: Am ersten Geraet war von der
+ * Akkuzahl in der rechten oberen Ecke nur die erste Ziffer zu sehen. Punkt,
+ * Verlaufsposition und Akku ruecken deshalb um so viel nach innen, wie die
+ * Rundung auf Hoehe der Kopfzeile wegnimmt.
+ */
+#define UI_HEADER_INSET_X 34
+#define UI_POSITION_X (UI_HEADER_INSET_X + 24)
 
 /* Tecki mittig oben; die Flaeche selbst steht in ui_status_icons.h. */
 #define TECKI_BOX UI_TECKI_BOX
