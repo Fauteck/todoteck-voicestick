@@ -263,6 +263,16 @@ static int8_t s_history_cursor = -1;
  */
 static bool s_empty_history_shown;
 /*
+ * Antwortmoeglichkeiten auf eine Rueckfrage ("Ja", "Nein") -- nur die Uhr
+ * zeigt sie, als Flaechen unter dem Text. Jede andere Szene raeumt sie weg
+ * (set_scene_full), genau wie die Verlaufsmarke: Sie gehoeren zu genau der
+ * einen Antwort, unter der sie stehen.
+ */
+static char s_choices[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
+static uint8_t s_choice_count;
+static lv_obj_t *s_choice_btn[UI_STATUS_CHOICES_MAX];
+static lv_obj_t *s_choice_label[UI_STATUS_CHOICES_MAX];
+/*
  * "2/5" in der Kopfzeile, solange geblaettert wird. Leer heisst: versteckt.
  *
  * Zwoelf Byte fuer fuenf Zeichen: Der Uebersetzer rechnet bei `snprintf` mit
@@ -604,6 +614,16 @@ typedef struct {
 #define QUESTION_H (QUESTION_LINES * UI_FONT_QUESTION->line_height + \
                     (QUESTION_LINES - 1) * QUESTION_LINE_SPACE)
 
+/* Hoehe einer Antwortflaeche und Abstand darueber -- nur die Uhr hat sie. */
+#define CHOICE_H 72
+#define CHOICE_GAP 10
+
+/* Unterkante des Texts: ueber den Antwortflaechen, wenn welche stehen. */
+static int32_t text_bottom_y(void)
+{
+    return s_choice_count > 0 ? TEXT_BOTTOM_Y - CHOICE_H - CHOICE_GAP : TEXT_BOTTOM_Y;
+}
+
 static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
 {
     lv_point_t size;
@@ -650,7 +670,7 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
     const int32_t full_status_h = with_question ? QUESTION_H : UI_FONT_STATUS->line_height;
     const int32_t status_h = (with_question || (status && status[0])) ? full_status_h : 0;
     const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
-    const int32_t room_beside_tecki = TEXT_BOTTOM_Y - top_beside;
+    const int32_t room_beside_tecki = text_bottom_y() - top_beside;
 
     if (kind == UI_TEXT_MESSAGE) {
         const text_step_t *step = largest_step_fitting(text, room_beside_tecki, COL_W);
@@ -671,7 +691,7 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
      * etwas traegt.
      */
     const int32_t top = STATUS_Y_TEXT_ONLY + full_status_h + TEXT_GAP;
-    const text_step_t *step = largest_step_fitting(text, TEXT_BOTTOM_Y - top, CONTENT_W);
+    const text_step_t *step = largest_step_fitting(text, text_bottom_y() - top, CONTENT_W);
     if (!step) {
         step = &TEXT_STEP_SMALLEST;
     }
@@ -857,7 +877,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
         const int32_t top = plan.status_y + plan.status_h + TEXT_GAP;
-        lv_obj_set_height(s_hint_label, TEXT_BOTTOM_Y - top);
+        lv_obj_set_height(s_hint_label, text_bottom_y() - top);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
@@ -865,6 +885,35 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     if (!clock_only) {
         lv_obj_remove_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /*
+     * Antwortflaechen nebeneinander am unteren Rand, gleich breit. Die
+     * erste ist gefuellt (die Zustimmung, die man meistens will), die
+     * uebrigen nur umrandet -- so trifft der Daumen nicht aus Versehen die
+     * falsche, weil beide gleich aussehen.
+     */
+    for (int i = 0; i < UI_STATUS_CHOICES_MAX; i++) {
+        if (!s_choice_btn[i]) {
+            continue;
+        }
+        if (i >= s_choice_count || clock_only) {
+            lv_obj_add_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const int32_t w = (CONTENT_W - (s_choice_count - 1) * CHOICE_GAP) / s_choice_count;
+        lv_obj_set_size(s_choice_btn[i], w, CHOICE_H);
+        lv_obj_align(s_choice_btn[i], LV_ALIGN_TOP_LEFT, i * (w + CHOICE_GAP),
+                     TEXT_BOTTOM_Y - CHOICE_H);
+        const bool primary = i == 0;
+        lv_obj_set_style_bg_opa(s_choice_btn[i], primary ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(s_choice_btn[i], lv_color_hex(0x2ecc71), 0);
+        lv_obj_set_style_border_width(s_choice_btn[i], primary ? 0 : 3, 0);
+        lv_obj_set_style_border_color(s_choice_btn[i], lv_color_hex(0x9aa3ad), 0);
+        lv_label_set_text(s_choice_label[i], s_choices[i]);
+        lv_obj_set_style_text_color(s_choice_label[i],
+                                    primary ? lv_color_hex(0x000000) : lv_color_hex(0xf2f2f2), 0);
+        lv_obj_remove_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN);
     }
 
     /* Der Platz im Verlauf ("2/5") steht in der sonst leeren Kopfzeile. */
@@ -984,6 +1033,18 @@ static void create_status_ui(void)
     create_battery_ui(s_screen);
     create_meters(s_screen);
     ui_status_icons_create(&s_icons, s_screen);
+
+#if UI_WATCH
+    for (int i = 0; i < UI_STATUS_CHOICES_MAX; i++) {
+        s_choice_btn[i] = lv_obj_create(s_screen);
+        lv_obj_remove_style_all(s_choice_btn[i]);
+        lv_obj_set_style_radius(s_choice_btn[i], CHOICE_H / 2, 0);
+        lv_obj_add_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN);
+        s_choice_label[i] = lv_label_create(s_choice_btn[i]);
+        lv_obj_set_style_text_font(s_choice_label[i], UI_FONT_STATUS, 0);
+        lv_obj_center(s_choice_label[i]);
+    }
+#endif
 
     s_position_label = lv_label_create(s_screen);
     lv_label_set_text(s_position_label, "");
@@ -1188,6 +1249,7 @@ static void set_scene_full(ui_status_icon_scene_t scene, const char *status,
 {
     _lock_acquire(&s_lvgl_lock);
     s_empty_history_shown = false;
+    s_choice_count = 0;
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
@@ -1459,7 +1521,7 @@ void ui_status_set_idle_text(const char *text, const char *question)
  * Waveshare-Uhr, die nach dem ersten Druck auf PWR (dem Einschalten) im
  * Verlauf stand und von dort nicht mehr nach "Koppeln" zurueckfand.
  */
-static void show_home(void)
+void ui_status_show_home(void)
 {
     char name[sizeof(s_device_name)];
     _lock_acquire(&s_lvgl_lock);
@@ -1473,7 +1535,14 @@ static void show_home(void)
     }
 }
 
-void ui_status_browse_history(void)
+/*
+ * Ein Schritt durch den Verlauf: +1 aelter, -1 neuer.
+ *
+ * Aelter ist die Richtung der Blaettertaste; neuer gibt es seit dem Wischen
+ * auf der Uhr. Wer ueber das Ende hinaus blaettert -- in die eine wie in die
+ * andere Richtung --, landet wieder zu Hause (show_home).
+ */
+static void browse_step(int dir)
 {
     char question[UI_QUESTION_MAX];
     char answer[UI_HINT_TEXT_MAX];
@@ -1489,8 +1558,10 @@ void ui_status_browse_history(void)
          */
         const bool again = s_empty_history_shown;
         _lock_release(&s_lvgl_lock);
-        if (again) {
-            show_home();
+        if (again || dir < 0) {
+            if (again) {
+                ui_status_show_home();
+            }
             return;
         }
         set_scene(UI_STATUS_ICON_IDLE, "Verlauf", "Noch keine Antwort", UI_TEXT_HINT);
@@ -1499,13 +1570,19 @@ void ui_status_browse_history(void)
         _lock_release(&s_lvgl_lock);
         return;
     }
-    s_history_cursor++;
-    if (s_history_cursor >= (int8_t)s_history_count) {
-        s_history_cursor = -1;
+    if (dir < 0 && s_history_cursor < 0) {
+        /* Nicht im Verlauf und "neuer" gewuenscht: neuer als jetzt gibt es nicht. */
         _lock_release(&s_lvgl_lock);
-        show_home();
         return;
     }
+    const int next = s_history_cursor + dir;
+    if (next < 0 || next >= (int)s_history_count) {
+        s_history_cursor = -1;
+        _lock_release(&s_lvgl_lock);
+        ui_status_show_home();
+        return;
+    }
+    s_history_cursor = (int8_t)next;
     /*
      * `s_history_next` zeigt auf den naechsten freien Platz, die juengste
      * Antwort liegt also davor. Das `+ UI_HISTORY_MAX` haelt den Ausdruck
@@ -1524,6 +1601,16 @@ void ui_status_browse_history(void)
                    UI_TEXT_MESSAGE, position);
 }
 
+void ui_status_browse_history(void)
+{
+    browse_step(1);
+}
+
+void ui_status_browse_newer(void)
+{
+    browse_step(-1);
+}
+
 /*
  * Abbruch: die Aufnahme laeuft nicht weiter und es geht nichts an Todoteck.
  * Bisher kehrte das Geraet dabei stumm in den Bereitzustand zurueck — nicht
@@ -1540,6 +1627,51 @@ void ui_status_set_cancelled(void)
  * nichts geht an Todoteck. Die Zeile sagt gleich, was stattdessen zu tun ist —
  * "Abgebrochen" allein liesse offen, warum.
  */
+void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t count)
+{
+#if UI_WATCH
+    if (count > UI_STATUS_CHOICES_MAX) {
+        count = UI_STATUS_CHOICES_MAX;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    for (uint8_t i = 0; i < count; i++) {
+        copy_utf8_display(s_choices[i], choices[i], sizeof(s_choices[i]));
+    }
+    s_choice_count = count;
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
+#else
+    (void)choices;
+    (void)count;
+#endif
+}
+
+int ui_status_choice_at(int16_t x, int16_t y, char *out, size_t out_size)
+{
+    int hit = -1;
+    _lock_acquire(&s_lvgl_lock);
+    for (int i = 0; i < s_choice_count && i < UI_STATUS_CHOICES_MAX; i++) {
+        if (!s_choice_btn[i] || lv_obj_has_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        lv_area_t area;
+        lv_obj_get_coords(s_choice_btn[i], &area);
+        /*
+         * Etwas grosszuegiger als die Flaeche selbst: Ein Daumen trifft am
+         * Handgelenk selten genau, und daneben liegt nur der Text.
+         */
+        if (x >= area.x1 - 8 && x <= area.x2 + 8 && y >= area.y1 - 16 && y <= area.y2 + 16) {
+            hit = i;
+            if (out && out_size) {
+                strlcpy(out, s_choices[i], out_size);
+            }
+            break;
+        }
+    }
+    _lock_release(&s_lvgl_lock);
+    return hit;
+}
+
 void ui_status_set_not_connected(void)
 {
     ESP_LOGI(TAG, "Sprechtaste ohne Bruecke");

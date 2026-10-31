@@ -2,7 +2,13 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
+
 #include "esp_err.h"
+
+/* Antwortmoeglichkeiten auf eine Rueckfrage: hoechstens drei, je 15 Byte Text. */
+#define UI_STATUS_CHOICES_MAX 3
+#define UI_STATUS_CHOICE_LEN 16
 
 esp_err_t ui_status_init(void);
 esp_err_t ui_status_set_brightness(uint8_t brightness);
@@ -16,6 +22,17 @@ void ui_status_set_idle_text(const char *text, const char *question);
 void ui_status_set_idle_dimmed(bool dimmed);
 /* Einen Schritt zurueck durch die letzten Fragen und Antworten. */
 void ui_status_browse_history(void);
+/* Eine Antwort neuer -- das Gegenstueck zum Blaettern, fuer das Wischen auf der Uhr. */
+void ui_status_browse_newer(void);
+/* Zurueck aufs Ziffernblatt, ohne Bruecke auf "Koppeln". */
+void ui_status_show_home(void);
+/*
+ * Antwortflaechen unter der gerade gezeigten Antwort (nur die Uhr). Die
+ * naechste Szene raeumt sie wieder weg.
+ */
+void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t count);
+/* Welche Flaeche liegt unter dem Finger? -1: keine. `out` bekommt ihren Text. */
+int ui_status_choice_at(int16_t x, int16_t y, char *out, size_t out_size);
 void ui_status_set_cancelled(void);
 void ui_status_set_press_too_short(void);
 /* Sprechtaste gedrueckt, aber keine Bruecke verbunden -- vorher geschah dann sichtbar nichts. */

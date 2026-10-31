@@ -942,6 +942,26 @@ esp_err_t voice_ble_send_device_info(void)
     return send_state_json(json);
 }
 
+esp_err_t voice_ble_send_choice(uint8_t index, const char *text)
+{
+    /*
+     * Der Text kommt von der Bruecke selbst ("Ja", "Nein") und geht nur
+     * zurueck. Anfuehrungszeichen und Backslash wuerden das JSON brechen --
+     * sie werden zu Leerzeichen, statt hier einen Escaper zu pflegen.
+     */
+    char clean[32];
+    size_t n = 0;
+    for (const char *p = text ? text : ""; *p && n + 1 < sizeof(clean); p++) {
+        clean[n++] = (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) ? ' ' : *p;
+    }
+    clean[n] = '\0';
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"choice\",\"index\":%u,\"text\":\"%s\"}",
+             (unsigned)index, clean);
+    ESP_LOGI(TAG, "choice %u: %s", (unsigned)index, clean);
+    return send_state_json(json);
+}
+
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)
 {
     char json[96];

@@ -188,6 +188,26 @@ content. Firmware may immediately render local physical feedback, such as
 switching Tecki to the recording pose when the primary button starts audio, but
 the app's `ui_state` is the authoritative display state.
 
+### Fork addition: `choices` on `ui_state` and the `choice` state event
+
+When the server asks back (for example "… Soll ich buchen?"), the Todoteck
+bridge adds the possible answers to the `ready` state:
+
+```json
+{"event":"ui_state","state":"ready","text":"12,40 € Bäcker, heute. Soll ich buchen?","choices":["Ja","Nein"]}
+```
+
+At most three, each up to 15 bytes. The Waveshare watch draws them as touch
+areas below the answer; a tap sends
+
+```json
+{"event":"choice","index":0,"text":"Ja"}
+```
+
+and the bridge answers the open question with that text — the same as saying
+it. The StickS3 ignores `choices` and keeps the spoken answer. The next scene
+clears the areas.
+
 ### Fork addition: `question` on `ui_state`
 
 The Todoteck bridge adds one optional field to the `ready` state:

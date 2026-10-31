@@ -185,10 +185,18 @@ Each image carries its device in the project name (`voice_stick` /
 reports `hardware` as `stick_s3` or `watch_206`, so a bridge can pick the right
 file.
 
-Not in this first port: Wi-Fi, the second microphone, the IMU (QMI8658, its
-interrupt is on GPIO21 and could wake from deep sleep), swipe gestures, the SD
-card and the 32 MB flash (the partition table stays at 8 MB, identical to the
-StickS3).
+Watch-only on top of that:
+
+| Feature | How |
+| --- | --- |
+| Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. On the StickS3 it stays off |
+| Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
+| Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
+| Swipes | Left: one answer older, right: one newer, down: back to the watch face. A tap on a dimmed screen only wakes it |
+
+Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
+(its interrupt is on GPIO21), the SD card and the 32 MB flash (the partition
+table stays at 8 MB, identical to the StickS3).
 
 ## Interaction Model
 
