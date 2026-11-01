@@ -74,8 +74,17 @@ esp_err_t voice_ble_send_glance_request(void);
 esp_err_t voice_ble_send_action(void);
 /* "Abbrechen" in der Transkript-Szene der Uhr: die Bruecke fuehrt den Satz nicht aus. */
 esp_err_t voice_ble_send_cancel_transcript(void);
-/* "Rueckgaengig" auf einer Karte: die Bruecke macht die letzte Karten-Aktion (`item`) rueckgaengig. */
-esp_err_t voice_ble_send_undo(void);
+/*
+ * "Rueckgaengig" einer Karten-Aktion: Art, Stand und Position wie beim `item`
+ * davor -- die Bruecke haelt die letzten Aktionen 15 Minuten und findet sie
+ * daran wieder. Aeltere Bruecken lesen nur das Ereignis und nehmen die
+ * letzte Aktion zurueck.
+ */
+esp_err_t voice_ble_send_undo(const char *kind, uint16_t rev, uint8_t index);
+/* "Rueckgaengig" eines Turns aus dem Verlauf: `ref` kam mit dem `ui_state` der Antwort. */
+esp_err_t voice_ble_send_undo_turn(uint16_t ref);
+/* "Nochmal" aus dem Verlauf: die Bruecke fuehrt die Frage als Text-Turn erneut aus. */
+esp_err_t voice_ble_send_repeat(const char *text);
 /* Rahmen an `speaker_rx` (Typbyte + Nutzlast), aus dem Bluetooth-Strang gerufen. */
 typedef void (*voice_ble_speaker_cb_t)(const uint8_t *data, size_t len);
 void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb);

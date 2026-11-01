@@ -27,6 +27,7 @@
 #include "esp_ota_ops.h"
 #include "ui_cards.h"
 #include "ui_control.h"
+#include "ui_history_text.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
@@ -318,6 +319,13 @@ typedef struct {
      */
     char choices[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
     uint8_t choice_count;
+    /*
+     * Nur bei `ready`: das Ergebnis des Turns fuer den Marker im Verlauf
+     * (`outcome`) und die Kennung, unter der die Bruecke ihn 15 Minuten lang
+     * zuruecknimmt (`ref`, 0 = nicht ruecknehmbar). docs/protocol.md.
+     */
+    uint8_t outcome;
+    uint16_t ref;
     /* Nur fuer APP_EVENT_TOUCH. */
     uint8_t gesture;
     int16_t touch_x;
@@ -351,13 +359,14 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
 }
 
 static void queue_ui_state_event(const char *state, const char *text,
-                                 const char *question, const cJSON *choices);
+                                 const char *question, const cJSON *choices,
+                                 ui_outcome_t outcome, uint16_t ref);
 static void queue_device_name_event(const char *name);
 static void queue_time_event(int64_t epoch, int32_t tz_offset_min);
 static void apply_interaction_mode(interaction_mode_t mode);
 static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
                                        const char (*choices)[UI_STATUS_CHOICE_LEN],
-                                       uint8_t choice_count);
+                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref);
 
 static bool is_external_powered(void)
 {
@@ -933,7 +942,7 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
 #endif
 
 static void queue_ui_state_event(const char *state, const char *text, const char *question,
-                                 const cJSON *choices)
+                                 const cJSON *choices, ui_outcome_t outcome, uint16_t ref)
 {
     if (!s_app_event_queue) {
         ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
@@ -944,6 +953,8 @@ static void queue_ui_state_event(const char *state, const char *text, const char
 
     app_event_t event = {
         .type = APP_EVENT_UI_STATE,
+        .outcome = (uint8_t)outcome,
+        .ref = ref,
     };
     if (state) {
         strlcpy(event.state, state, sizeof(event.state));
@@ -1345,9 +1356,15 @@ static void ble_control_cb(const char *json)
                          cJSON_IsNumber(tz_offset) ? (int32_t)tz_offset->valuedouble : 0);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
+        const cJSON *outcome = cJSON_GetObjectItemCaseSensitive(root, "outcome");
+        const cJSON *ref = cJSON_GetObjectItemCaseSensitive(root, "ref");
+        const double ref_value = cJSON_IsNumber(ref) ? ref->valuedouble : 0;
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
                              cJSON_IsString(question) ? question->valuestring : "",
-                             cJSON_GetObjectItemCaseSensitive(root, "choices"));
+                             cJSON_GetObjectItemCaseSensitive(root, "choices"),
+                             ui_outcome_from_name(cJSON_IsString(outcome) ? outcome->valuestring
+                                                                          : ""),
+                             ref_value >= 1 && ref_value <= 65535 ? (uint16_t)ref_value : 0);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "face") == 0) {
         apply_face_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
@@ -1404,12 +1421,12 @@ static uint32_t primary_hold_ms(void)
 
 static void apply_app_ui_state(const char *state, const char *text, const char *question)
 {
-    apply_app_ui_state_choices(state, text, question, NULL, 0);
+    apply_app_ui_state_choices(state, text, question, NULL, 0, UI_OUTCOME_NONE, 0);
 }
 
 static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
                                        const char (*choices)[UI_STATUS_CHOICE_LEN],
-                                       uint8_t choice_count)
+                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref)
 {
     ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
              state ? state : "nil",
@@ -1425,7 +1442,7 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
         s_app_ui_state = APP_UI_STATE_READY;
         /* Traegt die Antwort einen Text, gehoert er aufs Display — bisher
          * wurde er hier verworfen und war damit nur in der App zu sehen. */
-        ui_status_set_idle_text(text, question);
+        ui_status_set_idle_text(text, question, outcome, ref);
         if (choice_count > 0) {
             ui_status_set_choices(choices, choice_count);
         }
@@ -1694,6 +1711,58 @@ static void handle_palm(void)
  *   - Kontrollzentrum und Karten oeffnen nicht in der Transkript-Szene:
  *     Sie verdeckten genau die zwei Sekunden, in denen "Abbrechen" gilt.
  */
+/*
+ * Chips im Verlauf (V3, V4, V5): "Nochmal" schickt die Frage als `repeat`,
+ * die Bruecke fuehrt sie wie den Aktionssatz aus und antwortet normal.
+ * "Rueckgaengig" schickt `undo_turn` mit der `ref` des Turns oder `undo`
+ * mit den Koordinaten der Karten-Aktion; die Antwort kommt als `ui_state`
+ * ("Rueckgaengig" als Frage, Text, outcome done oder error). `true`, wenn
+ * ein Chip getroffen war -- dann tut das Tippen sonst nichts.
+ */
+static bool handle_history_chip(int16_t x, int16_t y)
+{
+    ui_history_chip_hit_t hit;
+    if (!ui_status_history_chip_at(x, y, &hit)) {
+        return false;
+    }
+    esp_err_t err = ESP_FAIL;
+    switch (hit.chip) {
+    case UI_HISTORY_CHIP_REPEAT:
+        ESP_LOGI(TAG, "Nochmal: %s", hit.question);
+        err = voice_ble_send_repeat(hit.question);
+        if (err == ESP_OK) {
+            apply_app_ui_state("thinking", "", "");
+        }
+        break;
+    case UI_HISTORY_CHIP_UNDO_TURN:
+        ESP_LOGI(TAG, "Rueckgaengig Turn ref=%u", (unsigned)hit.ref);
+        err = voice_ble_send_undo_turn(hit.ref);
+        if (err == ESP_OK) {
+            ui_status_history_mark_undone();
+            apply_app_ui_state("thinking", "", "");
+        }
+        break;
+    case UI_HISTORY_CHIP_UNDO_CARD:
+        ESP_LOGI(TAG, "Rueckgaengig Karte %s rev=%u #%u", ui_cards_kind_name(hit.card_kind),
+                 (unsigned)hit.card_rev, (unsigned)hit.card_index);
+        err = voice_ble_send_undo(ui_cards_kind_name(hit.card_kind), hit.card_rev, hit.card_index);
+        if (err == ESP_OK) {
+            ui_cards_restore((ui_card_kind_t)hit.card_kind, hit.card_rev, hit.card_index);
+            ui_status_history_mark_undone();
+        }
+        break;
+    default:
+        return false;
+    }
+    if (err == ESP_OK) {
+        voice_board_haptic_pattern(1, 30, 0);
+    } else {
+        ui_status_set_not_connected();
+        play_tone(AUDIO_TONE_CANCEL);
+    }
+    return true;
+}
+
 static bool cards_allowed(void)
 {
     return s_app_ui_state != APP_UI_STATE_RECORDING && s_app_ui_state != APP_UI_STATE_THINKING &&
@@ -1755,13 +1824,25 @@ static void handle_touch(const app_event_t *event)
         if (action == UI_CARDS_ITEM) {
             if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
                 voice_board_haptic_pattern(1, 40, 0);
+                /*
+                 * Karten-Aktion als Verlaufseintrag (V5): "Erledigt: Muell
+                 * rausstellen" bzw. "Licht Kueche: An", mit den Koordinaten
+                 * fuer ein spaeteres `undo` aus dem Verlauf (15 Minuten).
+                 */
+                char line[UI_CARD_TEXT_LEN + 16];
+                if (hit.kind == UI_CARD_SWITCHES) {
+                    snprintf(line, sizeof(line), "%s: %s", hit.text, hit.on ? "An" : "Aus");
+                } else {
+                    snprintf(line, sizeof(line), "Erledigt: %s", hit.text);
+                }
+                ui_status_history_add_card(line, (uint8_t)hit.kind, hit.rev, hit.index);
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
             }
         } else if (action == UI_CARDS_UNDO) {
             ESP_LOGI(TAG, "Rueckgaengig: %s #%u", ui_cards_kind_name(hit.kind),
                      (unsigned)hit.index);
-            if (voice_ble_send_undo() == ESP_OK) {
+            if (voice_ble_send_undo(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
                 voice_board_haptic_pattern(1, 30, 0);
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
@@ -1784,6 +1865,9 @@ static void handle_touch(const app_event_t *event)
         const int index = ui_status_choice_at(event->touch_x, event->touch_y,
                                               choice, sizeof(choice));
         if (index < 0) {
+            if (handle_history_chip(event->touch_x, event->touch_y)) {
+                break;
+            }
             /* Kurzform <-> ganze Antwort; sonst wie die Blaettertaste. */
             if (!ui_status_toggle_more()) {
                 queue_app_event(APP_EVENT_BROWSE_UP);
@@ -2011,7 +2095,8 @@ static void app_event_task(void *arg)
         case APP_EVENT_UI_STATE:
             apply_app_ui_state_choices(event.state, event.text, event.question,
                                        (const char (*)[UI_STATUS_CHOICE_LEN])event.choices,
-                                       event.choice_count);
+                                       event.choice_count, (ui_outcome_t)event.outcome,
+                                       event.ref);
             break;
         case APP_EVENT_TOUCH:
             handle_touch(&event);

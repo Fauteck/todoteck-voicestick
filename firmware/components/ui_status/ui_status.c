@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/lock.h>
 #include <time.h>
@@ -26,6 +27,7 @@
 #include "stick_s3_board.h"
 #include "ui_cards.h"
 #include "ui_control.h"
+#include "ui_history_text.h"
 #include "ui_status_icons.h"
 #include "ui_status_internal.h"
 
@@ -37,6 +39,9 @@
  */
 #if CONFIG_VOICE_BOARD_WATCH206
 #define UI_WATCH 1
+#include "esp_heap_caps.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "ui_display_watch206.h"
 #include "ui_layout_watch206.h"
 #define LCD_BACKLIGHT_DEFAULT 128
@@ -233,19 +238,43 @@ static lv_color_t s_muted_colour;
  * bei eins auf: Wer drei Sachen hintereinander diktiert und dann nachsieht,
  * will alle drei.
  *
- * Fuenf Plaetze, weil der Ring hier vollstaendig im internen RAM liegt und
- * jeder Platz 256 Byte kostet. Wer laenger zurueck muss, sieht in der App
- * nach — dort steht der Verlauf ohnehin ungekuerzt.
+ * Fuenf Plaetze auf dem StickS3, weil der Ring vollstaendig im internen RAM
+ * liegt und jeder Platz gut 270 Byte kostet. Die Uhr haelt zehn (knapp
+ * 2,8 KB) und sichert sie im NVS, damit sie den Neustart ueberleben (11/2026,
+ * Paket G). Wer laenger zurueck muss, sieht in der App nach — dort steht der
+ * Verlauf ohnehin ungekuerzt.
  *
  * Die Frage kommt aus dem Steuerbefehl der Bruecke (Feld `question`). Bleibt
  * sie leer — aeltere Bruecke, oder eine, die sie nicht schickt —, traegt der
  * Eintrag nur die Antwort, und die Statuszeile faellt auf "Verlauf" zurueck.
+ *
+ * Je Eintrag dazu (nur die Uhr zeigt es): Zeitpunkt, Ergebnis-Marker
+ * (`outcome`), die `ref` fuer "Rueckgaengig" eines Turns, und bei einer
+ * Karten-Aktion deren Koordinaten (Art, Stand, Position) fuer `undo`. Alles
+ * in festen Feldern, damit der Ring als ein Block ins NVS geht.
  */
+#if UI_WATCH
+#define UI_HISTORY_MAX 10
+#else
 #define UI_HISTORY_MAX 5
+#endif
+
+typedef enum {
+    UI_HISTORY_TURN,
+    UI_HISTORY_CARD,
+} ui_history_kind_t;
 
 typedef struct {
     char question[UI_QUESTION_MAX];
     char answer[UI_HINT_TEXT_MAX];
+    int64_t at;          /* UTC-Sekunden; 0 = die Uhr stand nicht */
+    uint16_t ref;        /* undo_turn-Kennung der Bruecke, 0 = nicht ruecknehmbar */
+    uint16_t card_rev;
+    uint8_t outcome;     /* ui_outcome_t */
+    uint8_t kind;        /* ui_history_kind_t */
+    uint8_t card_kind;
+    uint8_t card_index;
+    uint8_t undone;      /* Rueckgaengig schon geschickt */
 } ui_history_entry_t;
 
 static ui_history_entry_t s_history[UI_HISTORY_MAX];
@@ -253,12 +282,20 @@ static ui_history_entry_t s_history[UI_HISTORY_MAX];
 static uint8_t s_history_count;
 static uint8_t s_history_next;
 /*
- * Wo das Blaettern gerade steht: -1 heisst "nicht im Verlauf", 0 die juengste
- * Antwort, 1 die davor. Jeder neue Turn setzt ihn zurueck — sonst blaetterte
- * der naechste Druck mitten in einem Verlauf weiter, den man vor zehn Minuten
- * verlassen hat.
+ * Wo das Blaettern gerade steht: -1 heisst "nicht im Verlauf". Auf der Uhr
+ * ist 0 die Bilanz-Seite ("Heute 4 Befehle ...") und 1 die juengste Antwort;
+ * auf dem StickS3 ist 0 die juengste Antwort (HISTORY_FIRST). Jeder neue
+ * Turn setzt ihn zurueck — sonst blaetterte der naechste Druck mitten in
+ * einem Verlauf weiter, den man vor zehn Minuten verlassen hat.
  */
 static int8_t s_history_cursor = -1;
+#if UI_WATCH
+#define HISTORY_FIRST 1
+#else
+#define HISTORY_FIRST 0
+#endif
+/* "Rueckgaengig" gilt 15 Minuten -- dieselbe Frist wie in Bruecke und Server. */
+#define HISTORY_UNDO_WINDOW_S (15 * 60)
 /*
  * Steht gerade "Verlauf -- Noch keine Antwort" da? Dann bringt der naechste
  * Druck zurueck, statt denselben Schirm noch einmal zu zeigen. Jede andere
@@ -326,7 +363,41 @@ static lv_obj_t *s_cancel_btn;
 static lv_obj_t *s_cancel_track;
 static lv_obj_t *s_cancel_fill;
 static ui_dots_t s_history_dots;
+/*
+ * Der gezeigte Verlaufseintrag (Kopie, waehrend er auf dem Schirm steht):
+ * Marker und Zeit in der Zeile ueber der Frage, darunter die Chips. Jede
+ * andere Szene raeumt das weg (assign_scene_locked).
+ */
+static bool s_meta_shown;
+static ui_history_entry_t s_meta_entry;
+static lv_obj_t *s_meta_dot;
+static lv_obj_t *s_meta_label;
+#define HISTORY_CHIPS 2
+static lv_obj_t *s_chip_btn[HISTORY_CHIPS];
+static lv_obj_t *s_chip_label[HISTORY_CHIPS];
+static ui_history_chip_t s_chip_action[HISTORY_CHIPS];
+static uint8_t s_chip_count;
+/*
+ * Die grosse Uhrzeit, zellenweise: fuenf Labels, jede Ziffer mittig in einer
+ * Zelle fester Breite, der Doppelpunkt in einer schmalen. Die Gesamtbreite
+ * ist damit fuer jede Uhrzeit dieselbe, und "11:47" steht nicht mehr links
+ * von "08:00" -- in einer proportionalen Schrift traegt die "1" rechts Luft,
+ * und LVGL zentriert die Summe der Vorschuebe, nicht die Tinte.
+ */
+#define CLOCK_CELLS 5
+static lv_obj_t *s_clock_cell[CLOCK_CELLS];
+/* Verlauf im NVS: gebuendelt schreiben, hoechstens einmal je 30 s. */
+static esp_timer_handle_t s_history_save_timer;
+static bool s_history_dirty;
+#define HISTORY_SAVE_DELAY_US (30 * 1000 * 1000ULL)
+#define HISTORY_NVS_NAMESPACE "verlauf"
+#define HISTORY_NVS_KEY "ring"
+#define HISTORY_NVS_MAGIC 0x314c5256u /* "VRL1" */
+static void history_load(void);
+static void history_save_now(void);
 #endif
+/* Zuletzt gesetzte Uhrzeit auf dem Schirm (gross oder klein): nur bei neuen Ziffern zeichnen. */
+static char s_clock_text[8];
 
 #if !UI_WATCH
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
@@ -740,6 +811,18 @@ typedef struct {
 #define CANCEL_GAP 10
 #define CANCEL_BAR_H 6
 #define CANCEL_BAR_GAP 12
+/*
+ * Verlauf: die Zeile mit Marker und Zeit ueber der Frage (META_H hoch) und
+ * die Chips "Nochmal" / "Rueckgaengig" unten, nebeneinander, 56 px hoch --
+ * ueber der Punktreihe und unter "Tippen fuer mehr". Zwei Chips zu 170 px
+ * mit 10 px Luecke sind 350 px breit und beginnen bei x 14 (+16 Rand): Die
+ * Mitten liegen bei x 115 und 295, weit weg von den Eckrundungen.
+ */
+#define META_H 26
+#define META_DOT 12
+#define CHIP_H 56
+#define CHIP_W 170
+#define CHIP_GAP 10
 #endif
 
 /*
@@ -749,6 +832,7 @@ typedef struct {
  */
 static bool s_render_dots;
 static bool s_render_more;
+static bool s_render_meta;
 static bool s_transcript_active;
 
 /* Unterkante des Texts: ueber allem, was darunter steht. */
@@ -759,6 +843,9 @@ static int32_t text_bottom_y(void)
     if (s_render_dots) {
         y -= DOTS_ROW_H;
     }
+    if (s_chip_count > 0) {
+        y -= CHIP_H + CHIP_GAP;
+    }
     if (s_render_more) {
         y -= MORE_H + MORE_GAP;
     }
@@ -768,8 +855,19 @@ static int32_t text_bottom_y(void)
 #else
     (void)s_render_dots;
     (void)s_render_more;
+    (void)s_render_meta;
 #endif
     return y;
+}
+
+/* Hoehe der Marker-Zeile ueber der Frage im Verlauf; 0, wenn keine steht. */
+static int32_t meta_h(void)
+{
+#if UI_WATCH
+    return s_render_meta ? META_H : 0;
+#else
+    return 0;
+#endif
 }
 
 static int32_t text_height(const char *text, const text_step_t *step, int32_t width)
@@ -821,7 +919,7 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
     const lv_font_t *status_font = with_question ? question_font() : UI_FONT_STATUS;
     const int32_t full_status_h = with_question ? QUESTION_H : UI_FONT_STATUS->line_height;
     const int32_t status_h = (with_question || (status && status[0])) ? full_status_h : 0;
-    const int32_t top_beside = STATUS_Y_WITH_TECKI + status_h + TEXT_GAP;
+    const int32_t top_beside = STATUS_Y_WITH_TECKI + meta_h() + status_h + TEXT_GAP;
     const int32_t room_beside_tecki = text_bottom_y() - top_beside;
 
     /* Die Auskunft folgt der eingestellten Schriftgroesse, Beiwerk nicht. */
@@ -847,7 +945,7 @@ static text_layout_t plan_text_layout(const char *status, const char *question,
      * wenn sie gerade leer ist — sonst spraenge das Layout, sobald sie doch
      * etwas traegt.
      */
-    const int32_t top = STATUS_Y_TEXT_ONLY + full_status_h + TEXT_GAP;
+    const int32_t top = STATUS_Y_TEXT_ONLY + meta_h() + full_status_h + TEXT_GAP;
     const text_step_t *step = largest_step_fitting(text, text_bottom_y() - top, CONTENT_W,
                                                    first, last);
     if (!step) {
@@ -1275,14 +1373,78 @@ static int32_t s_clock_col_x;
 static int32_t s_clock_col_w;
 static int32_t s_clock_col_y;
 
+static bool s_clock_cells_shown;
+
+#if UI_WATCH
+/*
+ * Die grosse Uhrzeit zellenweise (nur auf dem Ziffernblatt): Zellbreite ist
+ * der breiteste Ziffern-Vorschub der Schrift, der Doppelpunkt bekommt seinen
+ * eigenen; in jeder Zelle steht die Tinte der Ziffer mittig
+ * (ink_center_shift je Zeichen). Fuenf Zeichen sind es immer -- "HH:MM" oder
+ * "--:--" --, sonst faellt die Zeile auf das eine Label zurueck.
+ */
+static void place_clock_cells_locked(const char *text, const lv_font_t *font)
+{
+    int32_t cell = 0;
+    for (char c = '0'; c <= '9'; c++) {
+        lv_font_glyph_dsc_t g;
+        if (lv_font_get_glyph_dsc(font, &g, (uint32_t)c, 0) && g.adv_w > cell) {
+            cell = g.adv_w;
+        }
+    }
+    lv_font_glyph_dsc_t colon;
+    const int32_t colon_w = lv_font_get_glyph_dsc(font, &colon, ':', 0) ? colon.adv_w : cell / 2;
+    const int32_t total = 4 * cell + colon_w;
+    int32_t x = s_clock_col_x + (s_clock_col_w - total) / 2;
+    for (int i = 0; i < CLOCK_CELLS; i++) {
+        const char one[2] = { text[i], '\0' };
+        const int32_t w = i == 2 ? colon_w : cell;
+        lv_label_set_text(s_clock_cell[i], one);
+        lv_obj_set_style_text_font(s_clock_cell[i], font, 0);
+        lv_obj_set_width(s_clock_cell[i], w);
+        lv_obj_align(s_clock_cell[i], LV_ALIGN_TOP_LEFT, x + ink_center_shift(font, one),
+                     s_clock_col_y);
+        lv_obj_remove_flag(s_clock_cell[i], LV_OBJ_FLAG_HIDDEN);
+        x += w;
+    }
+}
+#endif
+
 static void place_clock_label_locked(const char *text)
 {
+    strlcpy(s_clock_text, text, sizeof(s_clock_text));
+#if UI_WATCH
+    if (s_clock_cells_shown && strlen(text) == CLOCK_CELLS && s_clock_cell[0]) {
+        place_clock_cells_locked(text, UI_FONT_CLOCK_FACE);
+        lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    for (int i = 0; i < CLOCK_CELLS; i++) {
+        if (s_clock_cell[i]) {
+            lv_obj_add_flag(s_clock_cell[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+#endif
     lv_label_set_text(s_clock_label, text);
     const lv_font_t *font = lv_obj_get_style_text_font(s_clock_label, LV_PART_MAIN);
     const int32_t shift = ink_center_shift(font, text);
     const int32_t inset = shift < 0 ? -shift : shift;
     lv_obj_set_width(s_clock_label, s_clock_col_w - 2 * inset);
     lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, s_clock_col_x + shift + inset, s_clock_col_y);
+    lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Uhrzeit weg -- Label und Zellen. */
+static void hide_clock_locked(void)
+{
+    lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+#if UI_WATCH
+    for (int i = 0; i < CLOCK_CELLS; i++) {
+        if (s_clock_cell[i]) {
+            lv_obj_add_flag(s_clock_cell[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+#endif
 }
 
 static void render_face_lines_locked(bool visible, const char *event_line)
@@ -1390,7 +1552,31 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      */
     s_render_dots = UI_WATCH && !clock_only && s_position_text[0] != '\0';
     s_render_more = false;
+    s_render_meta = false;
 #if UI_WATCH
+    /*
+     * Verlaufseintrag: Marker-Zeile oben, Chips unten -- beides vor dem
+     * Messen, weil es dem Text Platz nimmt. "Nochmal" nur bei einem Turn mit
+     * Frage; "Rueckgaengig" solange die Bruecke den Turn (ref) oder die
+     * Karten-Aktion noch zuruecknimmt: 15 Minuten ab dem Eintrag.
+     */
+    s_chip_count = 0;
+    s_render_meta = !clock_only && s_meta_shown;
+    if (s_render_meta) {
+        const ui_history_entry_t *e = &s_meta_entry;
+        const int64_t now = (int64_t)time(NULL);
+        const bool fresh = e->at > 0 && s_clock_valid && now - e->at <= HISTORY_UNDO_WINDOW_S;
+        if (e->kind == UI_HISTORY_TURN && e->question[0]) {
+            s_chip_action[s_chip_count++] = UI_HISTORY_CHIP_REPEAT;
+        }
+        if (fresh && !e->undone) {
+            if (e->kind == UI_HISTORY_CARD) {
+                s_chip_action[s_chip_count++] = UI_HISTORY_CHIP_UNDO_CARD;
+            } else if (e->ref != 0) {
+                s_chip_action[s_chip_count++] = UI_HISTORY_CHIP_UNDO_TURN;
+            }
+        }
+    }
     /* Statisch statt auf dem Stack: gerendert wird auch aus dem Bluetooth-Strang. */
     static char short_text[SHORT_FORM_MAX];
     if (!clock_only && s_shortable && !s_expanded && s_choice_count == 0 &&
@@ -1449,7 +1635,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                       (question_text[0] ? QUESTION_LINES : 1) +
                       (question_text[0] ? QUESTION_LINE_SPACE : 0));
     lv_obj_align(s_status_label, LV_ALIGN_TOP_LEFT, plan.x,
-                 with_clock ? CLOCK_STATUS_Y : plan.status_y);
+                 with_clock ? CLOCK_STATUS_Y : plan.status_y + meta_h());
 
     if (with_clock) {
         char clock_text[8];
@@ -1463,11 +1649,11 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         s_clock_col_x = clock_only ? 0 : plan.x;
         s_clock_col_w = clock_only ? CONTENT_W : plan.width;
         s_clock_col_y = clock_only ? CLOCK_FACE_Y : CLOCK_Y;
+        s_clock_cells_shown = UI_WATCH && clock_only;
         place_clock_label_locked(clock_text);
         render_face_lines_locked(face_info, event_line);
-        lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+        hide_clock_locked();
         render_face_lines_locked(false, "");
     }
 
@@ -1489,14 +1675,14 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x,
-                     plan.status_y + plan.status_h + TEXT_GAP);
+                     plan.status_y + meta_h() + plan.status_h + TEXT_GAP);
     } else {
         /*
          * Feste Hoehe mit LV_LABEL_LONG_DOT: Was selbst in der kleinen
          * Schrift nicht mehr auf den Schirm passt, endet mit Auslassungs-
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
-        const int32_t top = plan.status_y + plan.status_h + TEXT_GAP;
+        const int32_t top = plan.status_y + meta_h() + plan.status_h + TEXT_GAP;
         lv_obj_set_height(s_hint_label, text_bottom_y() - top);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
@@ -1544,18 +1730,69 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * nach rechts wischen holt die aeltere Antwort von links herein (11/2026).
      */
     lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
-    if (s_render_dots && s_history_count > 0 && s_history_cursor >= 0) {
-        ui_dots_set(&s_history_dots, s_history_count,
-                    (uint8_t)(s_history_count - 1 - s_history_cursor));
+    /* Die Bilanz-Seite ist der rechte Punkt (zum Zifferblatt hin), die Eintraege links davon. */
+    if (s_render_dots && s_history_cursor >= 0) {
+        ui_dots_set(&s_history_dots, (uint8_t)(s_history_count + HISTORY_FIRST),
+                    (uint8_t)(s_history_count + HISTORY_FIRST - 1 - s_history_cursor));
     } else {
         ui_dots_set(&s_history_dots, 0, 0);
     }
+    int32_t bottom = TEXT_BOTTOM_Y - (s_render_dots ? DOTS_ROW_H : 0);
+    for (int i = 0; i < HISTORY_CHIPS; i++) {
+        if (i >= s_chip_count) {
+            lv_obj_add_flag(s_chip_btn[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const int32_t row_w = s_chip_count * CHIP_W + (s_chip_count - 1) * CHIP_GAP;
+        lv_obj_align(s_chip_btn[i], LV_ALIGN_TOP_LEFT,
+                     (CONTENT_W - row_w) / 2 + i * (CHIP_W + CHIP_GAP), bottom - CHIP_H);
+        const bool undo = s_chip_action[i] != UI_HISTORY_CHIP_REPEAT;
+        lv_label_set_text(s_chip_label[i], undo ? "Rückgängig" : "Nochmal");
+        /* Rueckgaengig hell gefuellt wie auf den Karten, Nochmal nur umrandet. */
+        lv_obj_set_style_bg_opa(s_chip_btn[i], undo ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_chip_btn[i], undo ? 0 : 2, 0);
+        lv_obj_set_style_text_color(s_chip_label[i],
+                                    undo ? lv_color_hex(0x000000) : lv_color_hex(0xf2f2f2), 0);
+        lv_obj_remove_flag(s_chip_btn[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_chip_count > 0) {
+        bottom -= CHIP_H + CHIP_GAP;
+    }
     if (s_render_more) {
-        lv_obj_align(s_more_btn, LV_ALIGN_TOP_MID, 0,
-                     TEXT_BOTTOM_Y - (s_render_dots ? DOTS_ROW_H : 0) - MORE_H);
+        lv_obj_align(s_more_btn, LV_ALIGN_TOP_MID, 0, bottom - MORE_H);
         lv_obj_remove_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_render_meta) {
+        /* Punkt in der Farbe des Ergebnisses, dahinter Wort und Zeit: "erledigt · vor 12 min". */
+        char when[32];
+        char meta[64];
+        ui_history_format_when(when, sizeof(when), s_clock_valid ? s_meta_entry.at : 0,
+                               (int64_t)time(NULL), s_clock_offset_min);
+        const char *word = ui_outcome_word((ui_outcome_t)s_meta_entry.outcome);
+        snprintf(meta, sizeof(meta), "%s%s%s", word, word[0] && when[0] ? " · " : "", when);
+        const int32_t y = plan.status_y + (META_H - META_DOT) / 2 - 2;
+        lv_obj_set_style_bg_color(s_meta_dot,
+                                  lv_color_hex(ui_outcome_colour((ui_outcome_t)s_meta_entry.outcome)),
+                                  0);
+        lv_obj_align(s_meta_dot, LV_ALIGN_TOP_LEFT, plan.x, y);
+        lv_label_set_text(s_meta_label, meta);
+        lv_obj_set_width(s_meta_label, plan.width - META_DOT - 8);
+        lv_obj_align(s_meta_label, LV_ALIGN_TOP_LEFT, plan.x + META_DOT + 8, plan.status_y - 2);
+        if (word[0] || when[0]) {
+            lv_obj_remove_flag(s_meta_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_meta_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_meta_entry.outcome != UI_OUTCOME_NONE) {
+            lv_obj_remove_flag(s_meta_dot, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_meta_dot, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        lv_obj_add_flag(s_meta_dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_meta_label, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_transcript_active && scene == UI_STATUS_ICON_TRANSCRIBING) {
         lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
@@ -1620,6 +1857,12 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, question_text[0] ? muted : text, 0);
     lv_obj_set_style_text_color(s_clock_label, text, 0);
+#if UI_WATCH
+    for (int i = 0; i < CLOCK_CELLS; i++) {
+        lv_obj_set_style_text_color(s_clock_cell[i], text, 0);
+    }
+    lv_obj_set_style_text_color(s_meta_label, muted, 0);
+#endif
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     s_muted_colour = muted;
     lv_obj_set_style_text_color(s_position_label, muted, 0);
@@ -1694,12 +1937,12 @@ static void clock_tick_cb(lv_timer_t *timer)
         return;
     }
     ui_status_header_refresh_locked();
-    if (!s_clock_label || lv_obj_has_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN)) {
+    if (!s_clock_label || !s_main_clock_shown) {
         return;
     }
     char now[8];
     format_clock(now, sizeof(now));
-    if (strcmp(now, lv_label_get_text(s_clock_label)) != 0) {
+    if (strcmp(now, s_clock_text) != 0) {
         /* Neue Ziffern, neue Tintenkanten: Lage mit dem Text nachziehen. */
         place_clock_label_locked(now);
         /*
@@ -1804,6 +2047,38 @@ static void create_status_ui(void)
     /* Seitenpunkte des Verlaufs, ganz unten mittig. */
     ui_dots_create(&s_history_dots, s_screen);
     lv_obj_align(s_history_dots.box, LV_ALIGN_TOP_MID, 0, TEXT_BOTTOM_Y - DOT_SIZE - 4);
+
+    /* Verlauf: Marker-Zeile (Punkt + Wort + Zeit) und die zwei Chips; Lage setzt render_scene_locked(). */
+    s_meta_dot = create_blob(s_screen, META_DOT, META_DOT, lv_color_hex(0x9aa3ad));
+    lv_obj_add_flag(s_meta_dot, LV_OBJ_FLAG_HIDDEN);
+    s_meta_label = lv_label_create(s_screen);
+    lv_obj_set_style_text_font(s_meta_label, UI_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(s_meta_label, lv_color_hex(0x9aa3ad), 0);
+    lv_label_set_long_mode(s_meta_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_meta_label, lv_font_get_line_height(UI_FONT_SMALL));
+    lv_obj_add_flag(s_meta_label, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < HISTORY_CHIPS; i++) {
+        s_chip_btn[i] = lv_obj_create(s_screen);
+        lv_obj_remove_style_all(s_chip_btn[i]);
+        lv_obj_remove_flag(s_chip_btn[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(s_chip_btn[i], CHIP_W, CHIP_H);
+        lv_obj_set_style_radius(s_chip_btn[i], CHIP_H / 2, 0);
+        lv_obj_set_style_bg_color(s_chip_btn[i], lv_color_hex(0xf2f2f2), 0);
+        lv_obj_set_style_border_color(s_chip_btn[i], lv_color_hex(0x9aa3ad), 0);
+        lv_obj_add_flag(s_chip_btn[i], LV_OBJ_FLAG_HIDDEN);
+        s_chip_label[i] = lv_label_create(s_chip_btn[i]);
+        lv_obj_set_style_text_font(s_chip_label[i], &todoteck_watch_font_23, 0);
+        lv_obj_center(s_chip_label[i]);
+    }
+
+    /* Die Zellen der grossen Uhrzeit; Schrift, Breite und Lage setzt place_clock_cells_locked(). */
+    for (int i = 0; i < CLOCK_CELLS; i++) {
+        s_clock_cell[i] = lv_label_create(s_screen);
+        lv_label_set_text(s_clock_cell[i], "");
+        lv_obj_set_style_text_font(s_clock_cell[i], UI_FONT_CLOCK_FACE, 0);
+        lv_obj_set_style_text_align(s_clock_cell[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(s_clock_cell[i], LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* Die kleine Uhrzeit oben mittig; lv_layer_top() kennt keinen Rand, daher + Rand. */
     s_header_clock = lv_label_create(lv_layer_top());
@@ -2037,6 +2312,9 @@ static void assign_scene_locked(ui_status_icon_scene_t scene, const char *status
 {
     s_empty_history_shown = false;
     s_choice_count = 0;
+#if UI_WATCH
+    s_meta_shown = false;
+#endif
     s_mood = UI_STATUS_MOOD_NONE;
     s_shortable = shortable;
     s_expanded = false;
@@ -2182,6 +2460,9 @@ esp_err_t ui_status_init(void)
     _lock_acquire(&s_lvgl_lock);
     create_status_ui();
     _lock_release(&s_lvgl_lock);
+#if UI_WATCH
+    history_load();
+#endif
 
     BaseType_t task_ok = xTaskCreate(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE,
                                      NULL, LVGL_TASK_PRIORITY, NULL);
@@ -2208,6 +2489,15 @@ esp_err_t ui_status_set_brightness(uint8_t brightness)
 void ui_status_prepare_deep_sleep(void)
 {
     (void)ui_status_set_brightness(0);
+#if UI_WATCH
+    /* Was noch nicht im Flash steht, jetzt -- nach dem Schlaf startet die Firmware neu. */
+    if (s_history_dirty) {
+        if (s_history_save_timer) {
+            (void)esp_timer_stop(s_history_save_timer);
+        }
+        history_save_now();
+    }
+#endif
 
     _lock_acquire(&s_lvgl_lock);
 #if UI_WATCH
@@ -2278,7 +2568,164 @@ void ui_status_set_idle(void)
  * einmal, statt sich spaeter ueber die Aufgabe zu wundern. Schickt die
  * Bruecke keine, steht dort wie bisher "Bereit".
  */
-void ui_status_set_idle_text(const char *text, const char *question)
+#if UI_WATCH
+/*
+ * Der Verlauf im NVS (V7): die Eintraege als ein Block, aeltester zuerst,
+ * mit Kennung und Satzgroesse davor -- ein Block aus einer anderen Fassung
+ * wird verworfen statt falsch gelesen. Geschrieben wird gebuendelt: Jede
+ * Aenderung setzt die Marke und startet den 30-s-Zeitgeber neu; erst dann
+ * geht der Block ins Flash (und vor dem Tiefschlaf sofort).
+ */
+typedef struct {
+    uint32_t magic;
+    uint16_t entry_size;
+    uint8_t count;
+    uint8_t reserved;
+} history_blob_header_t;
+
+static void history_save_now(void)
+{
+    history_blob_header_t header = {
+        .magic = HISTORY_NVS_MAGIC,
+        .entry_size = sizeof(ui_history_entry_t),
+    };
+    /* Im PSRAM, nicht auf dem Stack des Zeitgeber-Tasks (der hat 3,5 KB) und nicht statisch im internen RAM. */
+    const size_t blob_max = sizeof(header) + sizeof(s_history);
+    uint8_t *blob = heap_caps_malloc(blob_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!blob) {
+        blob = malloc(blob_max);
+    }
+    if (!blob) {
+        ESP_LOGW(TAG, "Verlauf nicht gesichert: kein Speicher");
+        return;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    s_history_dirty = false;
+    header.count = s_history_count;
+    memcpy(blob, &header, sizeof(header));
+    for (uint8_t i = 0; i < s_history_count; i++) {
+        /* Aeltester zuerst: der liegt `count` Plaetze vor dem naechsten freien. */
+        const uint8_t index = (uint8_t)((s_history_next + UI_HISTORY_MAX - s_history_count + i) %
+                                        UI_HISTORY_MAX);
+        memcpy(blob + sizeof(header) + (size_t)i * sizeof(ui_history_entry_t), &s_history[index],
+               sizeof(ui_history_entry_t));
+    }
+    _lock_release(&s_lvgl_lock);
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(HISTORY_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nvs, HISTORY_NVS_KEY, blob,
+                           sizeof(header) + (size_t)header.count * sizeof(ui_history_entry_t));
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
+    free(blob);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Verlauf nicht gesichert: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Verlauf gesichert: %u Eintraege", (unsigned)header.count);
+    }
+}
+
+static void history_save_timer_cb(void *arg)
+{
+    (void)arg;
+    history_save_now();
+}
+
+/* Sperre gehalten: Aenderung merken, Schreiben in 30 s. */
+static void history_mark_dirty_locked(void)
+{
+    s_history_dirty = true;
+    if (!s_history_save_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = history_save_timer_cb,
+            .name = "history_nvs",
+        };
+        if (esp_timer_create(&args, &s_history_save_timer) != ESP_OK) {
+            return;
+        }
+    }
+    (void)esp_timer_stop(s_history_save_timer);
+    (void)esp_timer_start_once(s_history_save_timer, HISTORY_SAVE_DELAY_US);
+}
+
+static void history_load(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK) {
+        /* Voller oder alter Speicher: voice_ble_init() loescht und legt neu an -- dann ohne Verlauf. */
+        ESP_LOGW(TAG, "NVS fuer den Verlauf nicht bereit: %s", esp_err_to_name(err));
+        return;
+    }
+    nvs_handle_t nvs;
+    if (nvs_open(HISTORY_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    const size_t blob_max = sizeof(history_blob_header_t) + sizeof(s_history);
+    uint8_t *blob = heap_caps_malloc(blob_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!blob) {
+        blob = malloc(blob_max);
+    }
+    if (!blob) {
+        nvs_close(nvs);
+        return;
+    }
+    size_t size = blob_max;
+    err = nvs_get_blob(nvs, HISTORY_NVS_KEY, blob, &size);
+    nvs_close(nvs);
+    history_blob_header_t header = { 0 };
+    if (err == ESP_OK && size >= sizeof(header)) {
+        memcpy(&header, blob, sizeof(header));
+    }
+    if (err != ESP_OK || header.magic != HISTORY_NVS_MAGIC ||
+        header.entry_size != sizeof(ui_history_entry_t) || header.count > UI_HISTORY_MAX ||
+        size < sizeof(header) + (size_t)header.count * sizeof(ui_history_entry_t)) {
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "Verlauf im NVS passt nicht zu dieser Fassung, verworfen");
+        }
+        free(blob);
+        return;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    memcpy(s_history, blob + sizeof(header), (size_t)header.count * sizeof(ui_history_entry_t));
+    for (uint8_t i = 0; i < header.count; i++) {
+        /* Zeichenketten sicher abschliessen, was auch immer im Flash stand. */
+        s_history[i].question[sizeof(s_history[i].question) - 1] = '\0';
+        s_history[i].answer[sizeof(s_history[i].answer) - 1] = '\0';
+    }
+    s_history_count = header.count;
+    s_history_next = (uint8_t)(header.count % UI_HISTORY_MAX);
+    s_history_cursor = -1;
+    _lock_release(&s_lvgl_lock);
+    free(blob);
+    ESP_LOGI(TAG, "Verlauf aus dem NVS: %u Eintraege", (unsigned)header.count);
+}
+#endif /* UI_WATCH */
+
+/* Sperre gehalten: naechsten Platz im Ring belegen und leeren. */
+static ui_history_entry_t *history_push_locked(void)
+{
+    ui_history_entry_t *entry = &s_history[s_history_next];
+    memset(entry, 0, sizeof(*entry));
+    entry->at = s_clock_valid ? (int64_t)time(NULL) : 0;
+    s_history_next = (uint8_t)((s_history_next + 1) % UI_HISTORY_MAX);
+    if (s_history_count < UI_HISTORY_MAX) {
+        s_history_count++;
+    }
+    /* Ein neuer Eintrag beendet das Blaettern — der naechste Druck faengt vorn an. */
+    s_history_cursor = -1;
+#if UI_WATCH
+    history_mark_dirty_locked();
+#endif
+    return entry;
+}
+
+void ui_status_set_idle_text(const char *text, const char *question, ui_outcome_t outcome,
+                             uint16_t ref)
 {
     if (!text || !text[0]) {
         ui_status_set_idle();
@@ -2287,19 +2734,84 @@ void ui_status_set_idle_text(const char *text, const char *question)
     ESP_LOGD(TAG, "idle mit Text");
 
     _lock_acquire(&s_lvgl_lock);
-    ui_history_entry_t *entry = &s_history[s_history_next];
+    ui_history_entry_t *entry = history_push_locked();
     copy_utf8_display(entry->question, question ? question : "", sizeof(entry->question));
     copy_utf8_display(entry->answer, text, sizeof(entry->answer));
-    s_history_next = (uint8_t)((s_history_next + 1) % UI_HISTORY_MAX);
-    if (s_history_count < UI_HISTORY_MAX) {
-        s_history_count++;
-    }
-    /* Ein neuer Turn beendet das Blaettern — der naechste Druck faengt vorn an. */
-    s_history_cursor = -1;
+    entry->kind = UI_HISTORY_TURN;
+    entry->outcome = (uint8_t)outcome;
+    entry->ref = ref;
     _lock_release(&s_lvgl_lock);
 
     set_scene_ex(UI_STATUS_ICON_IDLE, "Bereit", question ? question : "", text,
                  UI_TEXT_MESSAGE, "", true);
+}
+
+void ui_status_history_add_card(const char *line, uint8_t card_kind, uint16_t card_rev,
+                                uint8_t card_index)
+{
+    _lock_acquire(&s_lvgl_lock);
+    ui_history_entry_t *entry = history_push_locked();
+    copy_utf8_display(entry->answer, line ? line : "", sizeof(entry->answer));
+    entry->kind = UI_HISTORY_CARD;
+    entry->outcome = UI_OUTCOME_DONE;
+    entry->card_kind = card_kind;
+    entry->card_rev = card_rev;
+    entry->card_index = card_index;
+    _lock_release(&s_lvgl_lock);
+}
+
+bool ui_status_history_chip_at(int16_t x, int16_t y, ui_history_chip_hit_t *out)
+{
+#if UI_WATCH
+    bool hit = false;
+    _lock_acquire(&s_lvgl_lock);
+    for (int i = 0; s_meta_shown && i < s_chip_count && i < HISTORY_CHIPS; i++) {
+        if (lv_obj_has_flag(s_chip_btn[i], LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        lv_area_t area;
+        lv_obj_get_coords(s_chip_btn[i], &area);
+        if (x < area.x1 - UI_HIT_TOLERANCE || x > area.x2 + UI_HIT_TOLERANCE ||
+            y < area.y1 - UI_HIT_TOLERANCE || y > area.y2 + UI_HIT_TOLERANCE) {
+            continue;
+        }
+        hit = true;
+        if (out) {
+            memset(out, 0, sizeof(*out));
+            out->chip = s_chip_action[i];
+            strlcpy(out->question, s_meta_entry.question, sizeof(out->question));
+            out->ref = s_meta_entry.ref;
+            out->card_kind = s_meta_entry.card_kind;
+            out->card_rev = s_meta_entry.card_rev;
+            out->card_index = s_meta_entry.card_index;
+        }
+        break;
+    }
+    _lock_release(&s_lvgl_lock);
+    return hit;
+#else
+    (void)x;
+    (void)y;
+    (void)out;
+    return false;
+#endif
+}
+
+void ui_status_history_mark_undone(void)
+{
+#if UI_WATCH
+    _lock_acquire(&s_lvgl_lock);
+    const int index = s_history_cursor - HISTORY_FIRST;
+    if (s_meta_shown && index >= 0 && index < (int)s_history_count) {
+        const uint8_t slot = (uint8_t)((s_history_next + UI_HISTORY_MAX - 1 - index) %
+                                       UI_HISTORY_MAX);
+        s_history[slot].undone = 1;
+        s_meta_entry.undone = 1;
+        history_mark_dirty_locked();
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+#endif
 }
 
 /*
@@ -2355,6 +2867,7 @@ static void browse_step(int dir)
     char position[sizeof(s_position_text)];
 
     _lock_acquire(&s_lvgl_lock);
+#if !UI_WATCH
     if (s_history_count == 0) {
         /*
          * Leerer Verlauf: einmal sagen, dass da nichts ist -- und beim
@@ -2370,47 +2883,111 @@ static void browse_step(int dir)
             }
             return;
         }
-#if UI_WATCH
-        /* Leerer Zustand: Tecki schaut zur Seite, der Satz sagt, wie es losgeht. */
-        set_scene(UI_STATUS_ICON_LOOK_LEFT, "Verlauf",
-                  "Noch keine Antwort. Sprechtaste halten und fragen.", UI_TEXT_HINT);
-#else
         set_scene(UI_STATUS_ICON_IDLE, "Verlauf", "Noch keine Antwort", UI_TEXT_HINT);
-#endif
         _lock_acquire(&s_lvgl_lock);
         s_empty_history_shown = true;
         _lock_release(&s_lvgl_lock);
         return;
     }
+#endif
     if (dir < 0 && s_history_cursor < 0) {
         /* Nicht im Verlauf und "neuer" gewuenscht: neuer als jetzt gibt es nicht. */
         _lock_release(&s_lvgl_lock);
         return;
     }
     const int next = s_history_cursor + dir;
-    if (next < 0 || next >= (int)s_history_count) {
+    if (next < 0 || next >= (int)s_history_count + HISTORY_FIRST) {
         s_history_cursor = -1;
         _lock_release(&s_lvgl_lock);
         ui_status_show_home();
         return;
     }
     s_history_cursor = (int8_t)next;
+#if UI_WATCH
+    if (next == 0) {
+        /*
+         * Die Bilanz-Seite (V9): die erste Seite rechts vom Zifferblatt.
+         * Gezaehlt wird lokal ab Mitternacht Ortszeit aus den Eintraegen --
+         * Befehle sind die Turns des Tages, erledigt sind angelegte und
+         * erledigte Turns samt Karten-Aktionen, Fragen die Antworten.
+         */
+        unsigned commands = 0;
+        unsigned done = 0;
+        unsigned answers = 0;
+        unsigned errors = 0;
+        const int64_t now = (int64_t)time(NULL);
+        const int64_t today = ui_history_local_day(now, s_clock_offset_min);
+        for (uint8_t i = 0; i < s_history_count; i++) {
+            const ui_history_entry_t *e = &s_history[i];
+            if (!s_clock_valid || e->at <= 0 ||
+                ui_history_local_day(e->at, s_clock_offset_min) != today) {
+                continue;
+            }
+            if (e->kind == UI_HISTORY_CARD) {
+                done++;
+                continue;
+            }
+            commands++;
+            switch ((ui_outcome_t)e->outcome) {
+            case UI_OUTCOME_CREATED:
+            case UI_OUTCOME_DONE:
+                done++;
+                break;
+            case UI_OUTCOME_ANSWER:
+                answers++;
+                break;
+            case UI_OUTCOME_ERROR:
+                errors++;
+                break;
+            default:
+                break;
+            }
+        }
+        const bool empty = s_history_count == 0;
+        snprintf(position, sizeof(position), "0/%u", (unsigned)s_history_count % 100u);
+        _lock_release(&s_lvgl_lock);
+        if (empty) {
+            /* Leerer Verlauf: Tecki schaut zur Seite, der Satz sagt, wie es losgeht. */
+            set_scene_full(UI_STATUS_ICON_LOOK_LEFT, "Verlauf", "",
+                           "Noch keine Antwort. Sprechtaste halten und fragen.", UI_TEXT_HINT,
+                           position);
+            return;
+        }
+        ui_history_format_balance(answer, sizeof(answer), commands, done, answers, errors);
+        set_scene_full(UI_STATUS_ICON_IDLE, "Heute", "", answer, UI_TEXT_MESSAGE, position);
+        return;
+    }
+#endif
     /*
      * `s_history_next` zeigt auf den naechsten freien Platz, die juengste
      * Antwort liegt also davor. Das `+ UI_HISTORY_MAX` haelt den Ausdruck
      * positiv, bevor der Rest gebildet wird — in C ist der Rest einer
      * negativen Zahl negativ, und der Zugriff laege ausserhalb des Feldes.
      */
-    const uint8_t index = (uint8_t)((s_history_next + UI_HISTORY_MAX - 1 - s_history_cursor) %
+    const int entry_index = s_history_cursor - HISTORY_FIRST;
+    const uint8_t index = (uint8_t)((s_history_next + UI_HISTORY_MAX - 1 - entry_index) %
                                     UI_HISTORY_MAX);
-    strlcpy(question, s_history[index].question, sizeof(question));
-    strlcpy(answer, s_history[index].answer, sizeof(answer));
-    snprintf(position, sizeof(position), "%d/%d", s_history_cursor + 1, s_history_count);
+    const ui_history_entry_t *entry = &s_history[index];
+    strlcpy(question, entry->question, sizeof(question));
+    strlcpy(answer, entry->answer, sizeof(answer));
+    snprintf(position, sizeof(position), "%u/%u", (unsigned)(entry_index + 1) % 100u,
+             (unsigned)s_history_count % 100u);
+#if UI_WATCH
+    const ui_history_entry_t meta = *entry;
+#endif
     _lock_release(&s_lvgl_lock);
 
     ESP_LOGD(TAG, "Verlauf %s", position);
-    set_scene_ex(UI_STATUS_ICON_IDLE, "Verlauf", question, answer,
-                 UI_TEXT_MESSAGE, position, true);
+    _lock_acquire(&s_lvgl_lock);
+    assign_scene_locked(UI_STATUS_ICON_IDLE, "Verlauf", question, answer, UI_TEXT_MESSAGE,
+                        position, true);
+#if UI_WATCH
+    /* Marker, Zeit und Chips gehoeren zu genau diesem Eintrag -- nach assign, das sie wegraeumt. */
+    s_meta_entry = meta;
+    s_meta_shown = true;
+#endif
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
 }
 
 void ui_status_browse_history(void)

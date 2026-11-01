@@ -508,6 +508,9 @@ static ui_cards_action_t check_off_locked(card_list_t *list, int index, ui_cards
         hit->kind = s_kind;
         hit->rev = list->rev;
         hit->index = (uint8_t)index;
+        strlcpy(hit->text, item->text, sizeof(hit->text));
+        /* Schalter: `aux` ist der Stand vor dem Tippen, `done` kehrt ihn um. */
+        hit->on = (strcmp(item->aux, "1") == 0) != item->done;
     }
     hide_undo_locked();
     s_last.armed = true;
@@ -821,6 +824,28 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
     (void)y;
     (void)hit;
     return UI_CARDS_NONE;
+#endif
+}
+
+void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (kind >= UI_CARD_COUNT) {
+        return;
+    }
+    ui_status_lock();
+    card_list_t *list = &s_lists[kind];
+    if (list->rev == rev && index < list->count) {
+        list->items[index].done = kind == UI_CARD_SWITCHES ? !list->items[index].done : false;
+        if (s_visible && s_kind == kind) {
+            render_locked();
+        }
+    }
+    ui_status_unlock();
+#else
+    (void)kind;
+    (void)rev;
+    (void)index;
 #endif
 }
 

@@ -1,4 +1,4 @@
-set(srcs "ui_status.c" "ui_status_icons.c" "ui_cards.c" "ui_control.c"
+set(srcs "ui_status.c" "ui_status_icons.c" "ui_cards.c" "ui_control.c" "ui_history_text.c"
          "fonts/todoteck_font_16.c" "fonts/todoteck_font_14.c"
          "fonts/todoteck_font_13.c" "fonts/todoteck_font_12.c"
          "fonts/todoteck_font_11.c" "fonts/todoteck_font_10.c"
@@ -16,5 +16,5 @@ endif()
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "include" "."
-    REQUIRES driver esp_driver_ledc esp_lcd esp_timer stick_s3_board voice_board lvgl
+    REQUIRES driver esp_driver_ledc esp_lcd esp_timer nvs_flash stick_s3_board voice_board lvgl
 )

@@ -1035,10 +1035,47 @@ esp_err_t voice_ble_send_cancel_transcript(void)
     return send_state_json("{\"event\":\"cancel_transcript\"}");
 }
 
-esp_err_t voice_ble_send_undo(void)
+esp_err_t voice_ble_send_undo(const char *kind, uint16_t rev, uint8_t index)
 {
-    ESP_LOGI(TAG, "undo");
-    return send_state_json("{\"event\":\"undo\"}");
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"undo\",\"kind\":\"%s\",\"rev\":%u,\"index\":%u}",
+             kind ? kind : "", (unsigned)rev, (unsigned)index);
+    ESP_LOGI(TAG, "undo %s rev=%u index=%u", kind ? kind : "", (unsigned)rev, (unsigned)index);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_undo_turn(uint16_t ref)
+{
+    char json[64];
+    snprintf(json, sizeof(json), "{\"event\":\"undo_turn\",\"ref\":%u}", (unsigned)ref);
+    ESP_LOGI(TAG, "undo_turn ref=%u", (unsigned)ref);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_repeat(const char *text)
+{
+    /*
+     * Die Frage kam von der Bruecke (hoechstens 64 Byte) und geht zurueck.
+     * Anfuehrungszeichen und Backslash werden fuer JSON maskiert, Steuer-
+     * zeichen zu Leerzeichen; mehr Escaper braucht es fuer diesen Weg nicht.
+     */
+    char clean[136];
+    size_t n = 0;
+    for (const char *p = text ? text : ""; *p && n + 2 < sizeof(clean); p++) {
+        if (*p == '"' || *p == '\\') {
+            clean[n++] = '\\';
+            clean[n++] = *p;
+        } else if ((unsigned char)*p < 0x20) {
+            clean[n++] = ' ';
+        } else {
+            clean[n++] = *p;
+        }
+    }
+    clean[n] = '\0';
+    char json[176];
+    snprintf(json, sizeof(json), "{\"event\":\"repeat\",\"text\":\"%s\"}", clean);
+    ESP_LOGI(TAG, "repeat: %s", clean);
+    return send_state_json(json);
 }
 
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)

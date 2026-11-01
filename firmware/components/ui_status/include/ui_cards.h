@@ -44,6 +44,9 @@ typedef struct {
     ui_card_kind_t kind;
     uint16_t rev;
     uint8_t index;
+    /* Fuer den Verlaufseintrag: der Zeilentext und bei Schaltern der Zielzustand. */
+    char text[UI_CARD_TEXT_LEN];
+    bool on;
 } ui_cards_hit_t;
 
 /* "today", "shopping", "switches" -> Art; -1 bei Unbekanntem. */
@@ -63,6 +66,12 @@ void ui_cards_show(ui_card_kind_t kind);
 void ui_cards_refresh(void);
 void ui_cards_hide(void);
 bool ui_cards_visible(void);
+
+/*
+ * Rueckgaengig aus dem Verlauf: die Zeile zeigt wieder den Stand vor dem
+ * Tippen, sofern die Liste noch dieselbe ist (`rev`). Zeichnet neu, falls sichtbar.
+ */
+void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index);
 
 /* Gesten (voice_board_gesture_t als int) und Lage des Fingers. */
 ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit_t *hit);

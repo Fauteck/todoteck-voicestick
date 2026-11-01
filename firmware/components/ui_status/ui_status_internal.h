@@ -26,10 +26,11 @@ void ui_status_header_refresh_locked(void);
 
 /*
  * Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte von
+ * (zehn Verlaufseintraege plus Bilanz-Seite brauchen elf)
  * je UI_DOTS_SIZE px -- die Groesse steht hier, damit ui_cards.c die Reihe
  * auf die Mitte der Kopfzeile setzen kann.
  */
-#define UI_DOTS_MAX 5
+#define UI_DOTS_MAX 12
 #define UI_DOTS_SIZE 8
 
 typedef struct {
