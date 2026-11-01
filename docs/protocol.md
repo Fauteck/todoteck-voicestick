@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.3","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.4","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -305,8 +305,9 @@ on it, with an "Abbrechen" area at the bottom and a thin bar that runs down
 over `cancel_ms` (default 2000, at most 10000). A tap on the area, a palm on
 the screen, or a short press on the talk button within that window makes the
 watch send `cancel_transcript`, show "Abgebrochen" and vibrate briefly. The
-next `ui_state` (`thinking`, `ready`, …) ends the scene; after the window has
-run out the text stays but the area no longer cancels.
+next `ui_state` (`thinking`, `ready`, …) ends the scene — since 0.4.4 except
+a `thinking` with `stage` inside the window (see the 0.4.4 section); after the
+window has run out the text stays but the area no longer cancels.
 
 `list` items may carry a third element: the project colour `#RRGGBB` or `""`.
 Only `today` fills it; `shopping` and `switches` send `""` or omit it. The
@@ -458,6 +459,80 @@ cent, `f` a bit mask of the state at that moment:
 Samples are only taken once the clock has been set (RTC chip or `time`);
 the firmware version is not part of a sample — the bridge takes it from
 `device_info` and attaches it to the upload. The StickS3 ignores the request.
+
+### Fork addition: 0.4.4
+
+Package I for the watch (11/2026): night mode, stages instead of "Denkt
+nach", watch-face layouts, and calendar events on the Today card. Everything
+is optional in both directions: older watch firmware ignores unknown fields
+and events, a bridge that sends none of it leaves the watch as in 0.4.3, and
+the StickS3 shows the stage line and ignores the rest. `device_info` is
+unchanged (it stays within 244 bytes; the stages are not announced in
+`ui_states`).
+
+**`watch_settings` — two more fields** (bridge → watch):
+
+```json
+{"event":"watch_settings","font":"m","home_after_s":30,"tiles":["silent","brightness","cinema","saver","torch","battery"],"face":"info","night":"21:00-06:30"}
+```
+
+| Field | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `face` | <!-- doku-vertrag:uhr-layouts -->`info`, `minimal`, `large`<!-- /doku-vertrag --> | `info` | Watch-face layout. `info`: the time in cells, up to three lines, event countdown, battery, Tecki (as in 0.4.3). `minimal`: only the large time, the date ("So 1.11.") and the battery as a dot — no lines, no Tecki, no event. `large`: hours and minutes on two lines in 180 px, below exactly one line — the event countdown, otherwise the first face line; battery small in the header |
+| `night` | `""` (off) or `"HH:MM-HH:MM"` (local time, may span midnight) | `"21:00-06:30"` | Night window. Inside it the watch face — all three layouts — is drawn in dimmed red (time `#b0301c`, secondary text `#6a1d10`, Tecki tinted red, no green or blue accents; battery red stays red), and the brightness is capped at the lowest control-centre step ("Dunkel") in every scene; other scenes keep their colours. A brightness raised in the control centre at night holds until the screen next goes off. The window is checked every 10 s (battery tick) and when the clock is set. The night charging mode (USB, 22–6 h) keeps priority and stays as it is, but red inside the window |
+
+An unknown `face` or a malformed `night` leaves the current value. The watch
+keeps both in RTC memory like the other settings.
+
+**Layout picker on the watch** — a long press (0.6–2 s, one finger, no swipe)
+on the watch face opens it: one large preview with page dots and the name
+underneath ("Info", "Minimal", "Groß"). Swipe left/right pages, a tap takes
+the shown layout, swipe down or the left-edge back swipe cancels, and so do
+10 s without input. The watch applies the layout at once, keeps it in RTC
+memory and sends, on the state characteristic like `item` and `undo`:
+
+```json
+{"event":"face_layout","face":"minimal"}
+```
+
+The bridge stores it on the server and sends `watch_settings` again; a later
+`watch_settings` with a different `face` wins — the server is the truth.
+Elsewhere a long press stays what it was before 0.4.4: a tap.
+
+**Stages on `ui_state:thinking`** (bridge → watch):
+
+```json
+{"event":"ui_state","state":"thinking","stage":"understand"}
+{"event":"ui_state","state":"thinking","stage":"act"}
+```
+
+| `stage` | Line on the screen | Sent by the bridge |
+| --- | --- | --- |
+| `understand` | "Verstehe …" | as soon as the recording has ended and audio goes to the server (transcription) |
+| `act` | "Erledige …" | as soon as the transcript is there and the bridge starts `/voice/turn` (or the execution) |
+| missing (older bridge) | "Denkt nach" | — |
+
+From 5 s after the first `thinking` of a turn (not per stage) the line gets a
+seconds counter: "Erledige … 7 s", updated once a second while the screen is
+on. A `text` on `thinking` is shown below the line. `recording` reads "Höre
+zu". A `thinking` with `stage` that arrives while the `transcript` scene's
+cancel window is still running does not end that scene (it would hide
+"Abbrechen"); a `thinking` without `stage` ends it as before.
+
+**Calendar events on the Today card** — `list` items for `today` may carry
+the flag `e` (element 5) for a calendar event of today, in the group
+"Termine" that comes before all task groups:
+
+```json
+{"event":"list","kind":"today","rev":8,"part":0,"items":[["Zahnarzt","14:30","","Termine","e"],["Pool messen","18:00","#2ecc71","Heute",""]]}
+```
+
+An `e` row is read-only: a tap neither selects nor sends `item`, there is no
+OK chip and no strikethrough; the time sits on the right like a task's, and
+instead of the project colour the row carries a stripe in calendar blue
+`#3b82f6`. All-day events have an empty `aux`. The card counts as empty (Tecki
+and "Heute ist alles erledigt.") only without tasks and without events. Up to
+five group headings per list (was four).
 
 ### Fork addition: `question` on `ui_state`
 

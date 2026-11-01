@@ -238,6 +238,27 @@ static esp_timer_handle_t s_night_peek_timer;
 #define NIGHT_PEEK_US (10 * 1000 * 1000ULL)
 #define NIGHT_FROM_HOUR 22
 #define NIGHT_TO_HOUR 6
+/*
+ * Nachtmodus (Paket I, 0.4.4): im Fenster `watch_settings.night` (Ortszeit,
+ * darf ueber Mitternacht gehen; Voreinstellung 21:00-06:30) zeigt das
+ * Zifferblatt alles in gedaempftem Rot, und die Helligkeit ist hoechstens
+ * "Dunkel" -- in jeder Szene. Stellt der Nutzer im Kontrollzentrum hoeher,
+ * gilt das bis zum naechsten Schirm-aus (s_night_bright_override). Geprueft
+ * im Akku-Takt (zehn Sekunden) und wenn die Uhr gestellt wird. Nicht zu
+ * verwechseln mit dem Nachtlade-Modus oben: der gilt nur am Kabel und hat
+ * Vorrang; im Fenster ist er ebenfalls rot.
+ *
+ * Im RTC-Speicher wie die anderen `watch_settings`. `s_night_from_min ==
+ * s_night_to_min` heisst aus (`night: ""`).
+ */
+static RTC_DATA_ATTR uint16_t s_night_from_min = 21 * 60;
+static RTC_DATA_ATTR uint16_t s_night_to_min = 6 * 60 + 30;
+static bool s_night_window;
+static bool s_night_bright_override;
+/* Zifferblatt-Layout (`watch_settings.face` oder langer Druck), ui_face_layout_t. */
+static RTC_DATA_ATTR uint8_t s_face_layout = UI_FACE_INFO;
+static void update_night_window(void);
+static void apply_brightness_now(void);
 #endif
 /* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
 static bool s_action_fired;
@@ -308,6 +329,23 @@ typedef enum {
 } app_ui_state_t;
 
 static app_ui_state_t s_app_ui_state = APP_UI_STATE_READY;
+
+/*
+ * Stufen des Nachdenkens (Paket I, 0.4.4): `stage` an `ui_state:thinking`.
+ * "Verstehe ..." solange die Bruecke transkribiert, "Erledige ..." sobald sie
+ * ausfuehrt; ohne `stage` (aeltere Bruecke) wie bisher "Denkt nach".
+ */
+typedef enum {
+    THINK_STAGE_NONE,
+    THINK_STAGE_UNDERSTAND,
+    THINK_STAGE_ACT,
+} think_stage_t;
+/*
+ * Seit wann in diesem Turn gedacht wird (esp_timer, 0 = gerade nicht) --
+ * gezaehlt ab dem ersten `thinking`, nicht je Stufe. Ab fuenf Sekunden
+ * zeigt die Zeile einen Sekundenzaehler (ui_status_set_thinking).
+ */
+static int64_t s_thinking_since_us;
 
 typedef enum {
     INTERACTION_MODE_HOLD_TO_TALK,
@@ -421,6 +459,8 @@ typedef struct {
      */
     uint8_t outcome;
     uint16_t ref;
+    /* Nur bei `thinking`: think_stage_t aus `stage` (0.4.4). */
+    uint8_t stage;
     /* Nur fuer APP_EVENT_TOUCH. */
     uint8_t gesture;
     int16_t touch_x;
@@ -455,13 +495,14 @@ static void copy_utf8_clipped(char *dst, const char *src, size_t size)
 
 static void queue_ui_state_event(const char *state, const char *text,
                                  const char *question, const cJSON *choices,
-                                 ui_outcome_t outcome, uint16_t ref);
+                                 ui_outcome_t outcome, uint16_t ref, uint8_t stage);
 static void queue_device_name_event(const char *name);
 static void queue_time_event(int64_t epoch, int32_t tz_offset_min);
 static void apply_interaction_mode(interaction_mode_t mode);
 static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
                                        const char (*choices)[UI_STATUS_CHOICE_LEN],
-                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref);
+                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref,
+                                       uint8_t stage);
 
 static bool is_external_powered(void)
 {
@@ -670,6 +711,10 @@ static uint8_t active_brightness(void)
     if (s_saver && level > BRIGHTNESS_STEPS[2]) {
         level = BRIGHTNESS_STEPS[2];
     }
+    /* Im Nachtfenster hoechstens "Dunkel" -- es sei denn, der Nutzer hat eben hochgestellt. */
+    if (s_night_window && !s_night_bright_override && level > BRIGHTNESS_STEPS[2]) {
+        level = BRIGHTNESS_STEPS[2];
+    }
     return level;
 #else
     return DISPLAY_ACTIVE_BRIGHTNESS;
@@ -709,6 +754,10 @@ static void set_display_off(bool off)
         return;
     }
     s_display_off = off;
+    /* Nachts hochgestellte Helligkeit gilt bis zum naechsten Schirm-aus. */
+    if (off) {
+        s_night_bright_override = false;
+    }
     ui_status_set_display_off(off);
     ESP_LOGI(TAG, "Schirm %s", off ? "aus" : "an");
 #else
@@ -1144,7 +1193,8 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
 #endif
 
 static void queue_ui_state_event(const char *state, const char *text, const char *question,
-                                 const cJSON *choices, ui_outcome_t outcome, uint16_t ref)
+                                 const cJSON *choices, ui_outcome_t outcome, uint16_t ref,
+                                 uint8_t stage)
 {
     if (!s_app_event_queue) {
         ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
@@ -1157,6 +1207,7 @@ static void queue_ui_state_event(const char *state, const char *text, const char
         .type = APP_EVENT_UI_STATE,
         .outcome = (uint8_t)outcome,
         .ref = ref,
+        .stage = stage,
     };
     if (state) {
         strlcpy(event.state, state, sizeof(event.state));
@@ -1498,6 +1549,7 @@ static void apply_weather_command(const cJSON *root)
 static void apply_watch_settings_ui(void)
 {
     ui_status_set_font_level(s_font_level);
+    ui_status_set_face_layout((ui_face_layout_t)s_face_layout);
     ui_cards_refresh();
     if (s_tile_count > 0) {
         ui_control_set_tiles(s_tiles, s_tile_count);
@@ -1505,9 +1557,56 @@ static void apply_watch_settings_ui(void)
 }
 #endif
 
+#if CONFIG_VOICE_BOARD_WATCH206
+/* "HH:MM" -> Minute des Tages; -1, wenn es keine gueltige Uhrzeit ist. */
+static int parse_hhmm(const char *text)
+{
+    if (strlen(text) != 5 || text[2] != ':') {
+        return -1;
+    }
+    for (int i = 0; i < 5; i++) {
+        if (i != 2 && (text[i] < '0' || text[i] > '9')) {
+            return -1;
+        }
+    }
+    const int hour = (text[0] - '0') * 10 + (text[1] - '0');
+    const int minute = (text[3] - '0') * 10 + (text[4] - '0');
+    return hour < 24 && minute < 60 ? hour * 60 + minute : -1;
+}
+
+/*
+ * `night`: "" = aus, "HH:MM-HH:MM" = Fenster (Ortszeit, darf ueber
+ * Mitternacht gehen). `true`, wenn der Wert gueltig war und uebernommen ist.
+ */
+static bool parse_night_window(const char *text)
+{
+    if (text[0] == '\0') {
+        s_night_from_min = 0;
+        s_night_to_min = 0;
+        return true;
+    }
+    if (strlen(text) != 11 || text[5] != '-') {
+        return false;
+    }
+    char part[6];
+    memcpy(part, text, 5);
+    part[5] = '\0';
+    const int from = parse_hhmm(part);
+    memcpy(part, text + 6, 5);
+    const int to = parse_hhmm(part);
+    if (from < 0 || to < 0) {
+        return false;
+    }
+    s_night_from_min = (uint16_t)from;
+    s_night_to_min = (uint16_t)to;
+    return true;
+}
+#endif
+
 /*
  * `watch_settings`: Einstellungen der Uhr aus der App.
- *   {"event":"watch_settings","font":"m","home_after_s":30,"tiles":["silent","brightness"]}
+ *   {"event":"watch_settings","font":"m","home_after_s":30,"tiles":["silent","brightness"],
+ *    "face":"info","night":"21:00-06:30"}
  * Die Bruecke schickt sie bei jeder Verbindung und nach jedem Abgleich; sie
  * sind klein und idempotent. Was fehlt oder nicht passt, bleibt, wie es war;
  * unbekannte Kachelnamen fallen still weg. Den Rueckkehr-Zeitgeber startet
@@ -1561,8 +1660,29 @@ static void apply_watch_settings_command(const cJSON *root)
             s_tile_count = count;
         }
     }
-    ESP_LOGI(TAG, "watch_settings: Schrift %u, Rueckkehr %u s, %u Kacheln",
-             (unsigned)s_font_level, (unsigned)s_home_after_s, (unsigned)s_tile_count);
+    /*
+     * Seit 0.4.4: Layout des Zifferblatts und Nachtfenster. Der Server ist
+     * die Wahrheit -- ein `face` von hier gewinnt auch gegen eine Auswahl an
+     * der Uhr, die er noch nicht kennt. Das neue Fenster greift im naechsten
+     * Akku-Takt (zehn Sekunden), nicht aus diesem Bluetooth-Strang heraus.
+     */
+    const cJSON *face = cJSON_GetObjectItemCaseSensitive(root, "face");
+    if (cJSON_IsString(face)) {
+        const int layout = ui_face_layout_from_name(face->valuestring);
+        if (layout >= 0) {
+            s_face_layout = (uint8_t)layout;
+        }
+    }
+    const cJSON *night = cJSON_GetObjectItemCaseSensitive(root, "night");
+    if (cJSON_IsString(night) && !parse_night_window(night->valuestring)) {
+        ESP_LOGW(TAG, "watch_settings: Nachtfenster \"%s\" ungueltig", night->valuestring);
+    }
+    ESP_LOGI(TAG, "watch_settings: Schrift %u, Rueckkehr %u s, %u Kacheln, Layout %s, "
+             "Nacht %02u:%02u-%02u:%02u",
+             (unsigned)s_font_level, (unsigned)s_home_after_s, (unsigned)s_tile_count,
+             ui_face_layout_name((ui_face_layout_t)s_face_layout),
+             (unsigned)(s_night_from_min / 60) % 24u, (unsigned)(s_night_from_min % 60),
+             (unsigned)(s_night_to_min / 60) % 24u, (unsigned)(s_night_to_min % 60));
     apply_watch_settings_ui();
 #else
     (void)root;
@@ -1657,12 +1777,21 @@ static void ble_control_cb(const char *json)
         const cJSON *outcome = cJSON_GetObjectItemCaseSensitive(root, "outcome");
         const cJSON *ref = cJSON_GetObjectItemCaseSensitive(root, "ref");
         const double ref_value = cJSON_IsNumber(ref) ? ref->valuedouble : 0;
+        /* `stage` an `thinking` (0.4.4); Unbekanntes zaehlt wie keine Stufe. */
+        const cJSON *stage = cJSON_GetObjectItemCaseSensitive(root, "stage");
+        uint8_t stage_value = THINK_STAGE_NONE;
+        if (cJSON_IsString(stage) && strcmp(stage->valuestring, "understand") == 0) {
+            stage_value = THINK_STAGE_UNDERSTAND;
+        } else if (cJSON_IsString(stage) && strcmp(stage->valuestring, "act") == 0) {
+            stage_value = THINK_STAGE_ACT;
+        }
         queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
                              cJSON_IsString(question) ? question->valuestring : "",
                              cJSON_GetObjectItemCaseSensitive(root, "choices"),
                              ui_outcome_from_name(cJSON_IsString(outcome) ? outcome->valuestring
                                                                           : ""),
-                             ref_value >= 1 && ref_value <= 65535 ? (uint16_t)ref_value : 0);
+                             ref_value >= 1 && ref_value <= 65535 ? (uint16_t)ref_value : 0,
+                             stage_value);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "face") == 0) {
         note_ble_transfer();
         apply_face_command(root);
@@ -1739,12 +1868,14 @@ static uint32_t primary_hold_ms(void)
 
 static void apply_app_ui_state(const char *state, const char *text, const char *question)
 {
-    apply_app_ui_state_choices(state, text, question, NULL, 0, UI_OUTCOME_NONE, 0);
+    apply_app_ui_state_choices(state, text, question, NULL, 0, UI_OUTCOME_NONE, 0,
+                               THINK_STAGE_NONE);
 }
 
 static void apply_app_ui_state_choices(const char *state, const char *text, const char *question,
                                        const char (*choices)[UI_STATUS_CHOICE_LEN],
-                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref)
+                                       uint8_t choice_count, ui_outcome_t outcome, uint16_t ref,
+                                       uint8_t stage)
 {
     ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
              state ? state : "nil",
@@ -1752,6 +1883,10 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
              app_ui_state_name(s_app_ui_state),
              s_recording);
     stop_host_response_timer();
+    /* Der Turn denkt nicht mehr: Der naechste `thinking` zaehlt wieder ab null. */
+    if (strcmp(state, "thinking") != 0) {
+        s_thinking_since_us = 0;
+    }
     if (strcmp(state, "ready") == 0) {
         if (s_recording) {
             ESP_LOGI(TAG, "ignore ready ui_state while recording");
@@ -1787,8 +1922,25 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
             ui_status_set_recording(0);
         }
     } else if (strcmp(state, "thinking") == 0) {
+        if (s_app_ui_state != APP_UI_STATE_THINKING || s_thinking_since_us == 0) {
+            s_thinking_since_us = esp_timer_get_time();
+        }
         s_app_ui_state = APP_UI_STATE_THINKING;
-        ui_status_set_partial_text("");
+#if CONFIG_VOICE_BOARD_WATCH206
+        /*
+         * Eine Stufe waehrend der Frist des Transkripts verdeckt "Abbrechen"
+         * nicht: Die Szene bleibt, bis die Frist um ist oder die naechste
+         * kommt. Ohne Stufe (aeltere Bruecke) wie bisher -- die schickt
+         * `thinking` erst nach der Frist.
+         */
+        if (stage != THINK_STAGE_NONE && ui_status_transcript_cancellable()) {
+            ESP_LOGI(TAG, "Stufe %u waehrend der Transkript-Frist: Szene bleibt", (unsigned)stage);
+            return;
+        }
+#endif
+        ui_status_set_thinking(stage == THINK_STAGE_UNDERSTAND ? "Verstehe …" :
+                               stage == THINK_STAGE_ACT ? "Erledige …" : "Denkt nach",
+                               text, s_thinking_since_us);
     } else if (strcmp(state, "pending_confirmation") == 0) {
         s_app_ui_state = APP_UI_STATE_PENDING_CONFIRMATION;
         ui_status_set_partial_text("Bestätigen oder abbrechen");
@@ -1915,6 +2067,45 @@ static void update_night_mode(void)
     const int hour = local_hour_now();
     const bool window = hour >= 0 && (hour >= NIGHT_FROM_HOUR || hour < NIGHT_TO_HOUR);
     set_night_mode(s_usb_powered && window && !s_night_peek && !s_recording && !s_ota_updating);
+}
+
+/* Ortsminute des Tages (0..1439) aus Systemzeit und gemeldetem Abstand; -1 ohne gestellte Uhr. */
+static int local_minute_now(void)
+{
+    if (!s_clock_valid) {
+        return -1;
+    }
+    const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&now, &parts);
+    return parts.tm_hour * 60 + parts.tm_min;
+}
+
+/*
+ * Liegt die Ortszeit im Nachtfenster? Dann rot und gedeckelt (s. o.). Gerufen
+ * im Akku-Takt und nach dem Stellen der Uhr -- ein neues Fenster aus
+ * `watch_settings` greift damit spaetestens zehn Sekunden spaeter.
+ */
+static void update_night_window(void)
+{
+    const int now = local_minute_now();
+    const int from = s_night_from_min;
+    const int to = s_night_to_min;
+    bool in = false;
+    if (now >= 0 && from != to) {
+        in = from < to ? (now >= from && now < to) : (now >= from || now < to);
+    }
+    if (in == s_night_window) {
+        return;
+    }
+    s_night_window = in;
+    s_night_bright_override = false;
+    ESP_LOGI(TAG, "Nachtmodus %s", in ? "an" : "aus");
+    ui_status_set_night_red(in);
+    /* Der Nachtlade-Modus haelt seine eigene Helligkeit; sonst gilt die neue Obergrenze sofort. */
+    if (!s_night_mode && !ui_torch_on()) {
+        apply_brightness_now();
+    }
 }
 
 static void night_peek_timer_cb(void *arg)
@@ -2096,6 +2287,8 @@ static void handle_control_tile(int tile)
     switch ((ui_control_tile_t)tile) {
     case UI_CONTROL_BRIGHTNESS:
         s_brightness_level = (uint8_t)((s_brightness_level + 1) % 3);
+        /* Nachts darf der Nutzer trotzdem hochstellen -- bis der Schirm ausgeht. */
+        s_night_bright_override = s_night_window;
         apply_brightness_now();
         break;
     case UI_CONTROL_SILENT:
@@ -2168,6 +2361,7 @@ static void handle_home_timeout(void)
         s_answer_unread = false;
     }
     ESP_LOGI(TAG, "%u s ohne Bedienung -> Ziffernblatt", (unsigned)s_home_after_s);
+    ui_face_picker_hide();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2188,6 +2382,7 @@ static void handle_palm(void)
         abort_recording();
     }
     ui_torch_set(false);
+    ui_face_picker_hide();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2229,7 +2424,17 @@ static void handle_palm(void)
  *                                      form <-> ganz; sonst   Schalter mit `c`:
  *                                      aelter                 markieren, dann
  *                                                             "OK"; Rueckg.
+ *   Lange druecken    Layout-Auswahl   wie Tippen             wie Tippen          wie Tippen
+ *   (0,6-2 s, 0.4.4)  (Info, Minimal,
+ *                     Gross)
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
+ *
+ * In der Layout-Auswahl: links/rechts blaettert, Tippen uebernimmt, nach
+ * unten oder vom linken Rand bricht ab (auch nach 10 s ohne Eingabe). Bis
+ * 0.4.3 war langer Druck auf dem Schirm frei -- eine Beruehrung bis 0,8 s
+ * ohne Wischen war ein Tippen, darueber zaehlte sie als Aermel und tat
+ * nichts. Der lange Druck auf die Blaettertaste (Aktion) ist davon
+ * unberuehrt.
  *
  * Sonderfaelle: Ein gedimmter Schirm wird von der ersten Beruehrung nur
  * geweckt; waehrend der Aufnahme tut der Schirm nichts (das Handgelenk
@@ -2316,9 +2521,38 @@ static bool cards_allowed(void)
            s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION;
 }
 
+/*
+ * Layout an der Uhr gewaehlt (Paket I): sofort zeigen, im RTC-Speicher
+ * merken und der Bruecke melden, die es beim Server speichert und danach
+ * `watch_settings` neu schickt. Ohne Verbindung gilt es trotzdem -- bis die
+ * naechsten `watch_settings` des Servers kommen, der die Wahrheit ist.
+ */
+static void choose_face_layout(ui_face_layout_t layout)
+{
+    s_face_layout = (uint8_t)layout;
+    ui_status_set_face_layout(layout);
+    ESP_LOGI(TAG, "Zifferblatt-Layout %s", ui_face_layout_name(layout));
+    if (voice_ble_send_face_layout(ui_face_layout_name(layout)) != ESP_OK) {
+        ESP_LOGW(TAG, "face_layout nicht gesendet (keine Bruecke)");
+    }
+    haptic_pattern(1, 30, 0);
+}
+
 static void handle_touch(const app_event_t *event)
 {
-    if (event->gesture == VOICE_BOARD_PALM) {
+    /*
+     * Langer Druck (0.4.4) ist nur auf dem Zifferblatt eine eigene Geste --
+     * dort oeffnet er die Auswahl der Layouts. Ueberall sonst bleibt er, was
+     * er bis 0.4.3 war: ein Tippen (bis 0,8 s zaehlte jede Beruehrung ohne
+     * Wischen als Tippen). Bei gedimmtem Schirm weckt er nur, wie jedes Tippen.
+     */
+    uint8_t gesture = event->gesture;
+    if (gesture == VOICE_BOARD_LONG_PRESS &&
+        (s_night_mode || s_display_dimmed || ui_face_picker_visible() || ui_control_visible() ||
+         ui_cards_visible() || !ui_status_face_shown())) {
+        gesture = VOICE_BOARD_TAP;
+    }
+    if (gesture == VOICE_BOARD_PALM) {
         handle_palm();
         return;
     }
@@ -2341,10 +2575,28 @@ static void handle_touch(const app_event_t *event)
         return;
     }
     if (ui_status_transcript_shown()) {
-        if (event->gesture == VOICE_BOARD_TAP &&
+        if (gesture == VOICE_BOARD_TAP &&
             ui_status_transcript_cancel_at(event->touch_x, event->touch_y)) {
             cancel_transcript();
         }
+        return;
+    }
+    /* Auswahl des Zifferblatt-Layouts: alle Gesten gehen an sie. */
+    if (ui_face_picker_visible()) {
+        ui_face_layout_t chosen = UI_FACE_INFO;
+        const ui_face_picker_action_t action =
+            ui_face_picker_touch(gesture, event->touch_x, event->touch_y, &chosen);
+        if (action == UI_FACE_PICKER_CHOSEN) {
+            choose_face_layout(chosen);
+        } else if (action == UI_FACE_PICKER_CANCELLED) {
+            haptic_pattern(1, 15, 0);
+        }
+        return;
+    }
+    if (gesture == VOICE_BOARD_LONG_PRESS) {
+        /* Nur noch auf dem Zifferblatt (s. o.): die Auswahl der Layouts. */
+        ui_face_picker_show((ui_face_layout_t)s_face_layout);
+        haptic_pattern(1, 40, 0);
         return;
     }
     /*
@@ -2354,7 +2606,7 @@ static void handle_touch(const app_event_t *event)
      * dem Zifferblatt selbst gibt es nichts, wohin; dort bleibt es das
      * normale Wischen nach rechts (in den Verlauf).
      */
-    if (event->gesture == VOICE_BOARD_SWIPE_RIGHT && event->touch_x < BACK_EDGE_PX &&
+    if (gesture == VOICE_BOARD_SWIPE_RIGHT && event->touch_x < BACK_EDGE_PX &&
         (ui_control_visible() || ui_cards_visible() || ui_status_in_history())) {
         ui_control_hide();
         ui_cards_hide();
@@ -2362,13 +2614,13 @@ static void handle_touch(const app_event_t *event)
         return;
     }
     if (ui_control_visible()) {
-        if (event->gesture == VOICE_BOARD_TAP) {
+        if (gesture == VOICE_BOARD_TAP) {
             const int tile = ui_control_tile_at(event->touch_x, event->touch_y);
             if (tile >= 0) {
                 handle_control_tile(tile);
             }
-        } else if (event->gesture == VOICE_BOARD_SWIPE_UP ||
-                   event->gesture == VOICE_BOARD_SWIPE_DOWN) {
+        } else if (gesture == VOICE_BOARD_SWIPE_UP ||
+                   gesture == VOICE_BOARD_SWIPE_DOWN) {
             ui_control_hide();
         }
         return;
@@ -2378,7 +2630,7 @@ static void handle_touch(const app_event_t *event)
      * zu sehen ist. Weiter unten angesetzt ist "nach unten" eine Ebene
      * zurueck. touch_y ist der Punkt, an dem der Finger aufsetzte.
      */
-    if (event->gesture == VOICE_BOARD_SWIPE_DOWN && event->touch_y < TOP_EDGE_PX) {
+    if (gesture == VOICE_BOARD_SWIPE_DOWN && event->touch_y < TOP_EDGE_PX) {
         ui_cards_hide();
         const ui_control_state_t st = control_state();
         ui_control_show(&st);
@@ -2386,7 +2638,7 @@ static void handle_touch(const app_event_t *event)
     }
     if (ui_cards_visible()) {
         ui_cards_hit_t hit;
-        const ui_cards_action_t action = ui_cards_touch(event->gesture, event->touch_x,
+        const ui_cards_action_t action = ui_cards_touch(gesture, event->touch_x,
                                                         event->touch_y, &hit);
         if (action == UI_CARDS_ITEM) {
             if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
@@ -2428,7 +2680,7 @@ static void handle_touch(const app_event_t *event)
         }
         return;
     }
-    switch ((voice_board_gesture_t)event->gesture) {
+    switch ((voice_board_gesture_t)gesture) {
     case VOICE_BOARD_TAP: {
         char choice[UI_STATUS_CHOICE_LEN];
         const int index = ui_status_choice_at(event->touch_x, event->touch_y,
@@ -2667,7 +2919,7 @@ static void app_event_task(void *arg)
             apply_app_ui_state_choices(event.state, event.text, event.question,
                                        (const char (*)[UI_STATUS_CHOICE_LEN])event.choices,
                                        event.choice_count, (ui_outcome_t)event.outcome,
-                                       event.ref);
+                                       event.ref, event.stage);
             break;
         case APP_EVENT_TOUCH:
             handle_touch(&event);
@@ -2678,6 +2930,7 @@ static void app_event_task(void *arg)
                 break;
             }
             /* Nichts darf die Frist verdecken: Ebenen und Taschenlampe weg. */
+            ui_face_picker_hide();
             ui_control_hide();
             ui_cards_hide();
             if (ui_torch_on()) {
@@ -2837,6 +3090,9 @@ static void app_event_task(void *arg)
             s_clock_offset_min = event.tz_offset_min;
             s_clock_valid = true;
             ui_status_set_clock(event.epoch, event.tz_offset_min);
+#if CONFIG_VOICE_BOARD_WATCH206
+            update_night_window();
+#endif
             ESP_LOGI(TAG, "Uhr gestellt: %lld UTC, Ortszeit %+d min",
                      (long long)event.epoch, (int)event.tz_offset_min);
             /*
@@ -3256,6 +3512,7 @@ static void update_battery_status(void)
         update_battery_estimate(level, charging || usb_powered);
         battery_log_sample(level, charging, usb_powered);
         update_night_mode();
+        update_night_window();
         if (charging || usb_powered) {
             s_saver_auto_done = false;
         } else if (!s_saver && !s_saver_auto_done && level <= SAVER_AUTO_PERCENT) {

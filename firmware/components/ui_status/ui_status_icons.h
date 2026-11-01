@@ -90,5 +90,11 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
 void ui_status_icons_set_box(ui_status_icons_t *icons, int32_t box, int32_t x, int32_t y);
 /* Platz machen: bei langem Text weicht die Figur dem Text. */
 void ui_status_icons_show(ui_status_icons_t *icons, bool visible);
+/*
+ * Nach ui_status_icons_apply(): Koerper und Punkte in `mark`, Augen, Lider
+ * und Kreuze in `eye` -- fuer das rote Zifferblatt im Nachtmodus (0.4.4).
+ * Das naechste apply() setzt die Farben der Pose wieder.
+ */
+void ui_status_icons_tint(ui_status_icons_t *icons, uint32_t mark, uint32_t eye);
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene);
 void ui_status_icons_stop_anim(ui_status_icons_t *icons);

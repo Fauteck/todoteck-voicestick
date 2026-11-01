@@ -161,6 +161,58 @@ void ui_status_set_battery_remaining(const char *line);
  * Tecki, keine Kopfzeile. Andere Szenen bleiben, wie sie sind.
  */
 void ui_status_set_night_mode(bool on);
+/*
+ * Nachtmodus (0.4.4, nur die Uhr wertet es aus): im Fenster `watch_settings.night`
+ * zeigt das Zifferblatt -- alle drei Layouts -- alles in gedaempftem Rot.
+ * Andere Szenen bleiben farbig; die Helligkeit deckelt main.c.
+ */
+void ui_status_set_night_red(bool on);
+
+/*
+ * Zifferblatt-Layouts (0.4.4): `watch_settings.face` und die Auswahl am
+ * langen Druck. Die Namen stehen in ui_face_picker.c (FACE_LAYOUT_NAMES)
+ * und im Protokoll (doku-vertrag:uhr-layouts).
+ */
+typedef enum {
+    UI_FACE_INFO,     /* Uhrzeit in Zellen, drei Zeilen, Termin, Akku, Tecki */
+    UI_FACE_MINIMAL,  /* nur grosse Uhrzeit, Datum, Akku-Punkt */
+    UI_FACE_LARGE,    /* sehr grosse Uhrzeit zweizeilig, eine Zeile darunter */
+    UI_FACE_COUNT,
+} ui_face_layout_t;
+
+/* "info", "minimal", "large" -> Layout; -1 bei Unbekanntem. */
+int ui_face_layout_from_name(const char *name);
+const char *ui_face_layout_name(ui_face_layout_t layout);
+void ui_status_set_face_layout(ui_face_layout_t layout);
+/* Steht gerade das Zifferblatt (welches Layout auch immer) auf dem Schirm? */
+bool ui_status_face_shown(void);
+
+/*
+ * Auswahl des Layouts (nur die Uhr): eine grosse Vorschau, links/rechts
+ * wischen blaettert, Seitenpunkte, Name darunter. Tippen uebernimmt, nach
+ * unten oder vom linken Rand bricht ab, nach 10 s ohne Eingabe auch.
+ */
+typedef enum {
+    UI_FACE_PICKER_NONE,       /* geblaettert oder nichts */
+    UI_FACE_PICKER_CHOSEN,     /* uebernommen -- `chosen` sagt welches; Auswahl ist zu */
+    UI_FACE_PICKER_CANCELLED,  /* abgebrochen; Auswahl ist zu */
+} ui_face_picker_action_t;
+
+void ui_face_picker_show(ui_face_layout_t current);
+void ui_face_picker_hide(void);
+bool ui_face_picker_visible(void);
+/* Gesten (voice_board_gesture_t als int) und Lage des Fingers. */
+ui_face_picker_action_t ui_face_picker_touch(int gesture, int16_t x, int16_t y,
+                                             ui_face_layout_t *chosen);
+
+/*
+ * "Denkt nach" mit Stufe (0.4.4): `status` ist die Zeile ("Verstehe …",
+ * "Erledige …", ohne Stufe "Denkt nach"), `text` ein Teiltext darunter.
+ * `since_us` (esp_timer) ist der Beginn des Nachdenkens in diesem Turn: ab
+ * fuenf Sekunden haengt die Zeile einen Sekundenzaehler an ("Erledige … 7 s"),
+ * einmal je Sekunde nachgezogen, solange der Schirm an ist. 0 = kein Zaehler.
+ */
+void ui_status_set_thinking(const char *status, const char *text, int64_t since_us);
 void ui_status_set_partial_text(const char *text);
 void ui_status_set_ota_progress(uint32_t written, uint32_t size);
 void ui_status_set_ota_rebooting(void);

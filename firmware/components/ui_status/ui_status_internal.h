@@ -23,6 +23,9 @@ uint8_t ui_status_font_level(void);
  * Ausblenden von Karten, Kontrollzentrum und Taschenlampe. Sperre gehalten.
  */
 void ui_status_header_refresh_locked(void);
+/* Uhrzeit "07:42" ("--:--" ungestellt) und Datum "So 1.11." (leer ungestellt) -- fuer die Vorschau der Layouts. */
+void ui_status_format_clock(char *out, size_t size);
+void ui_status_format_date(char *out, size_t size);
 /* Nachtlade-Modus aktiv? Dann vibriert und piept nichts (ui_cards.c fragt vor der Warn-Vibration). */
 bool ui_status_night_mode(void);
 

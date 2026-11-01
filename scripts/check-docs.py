@@ -34,6 +34,8 @@ BOARD_H = ROOT / "firmware/components/stick_s3_board/include/stick_s3_board.h"
 VOICE_BOARD_H = ROOT / "firmware/components/voice_board/include/voice_board.h"
 UI_CONTROL_C = ROOT / "firmware/components/ui_status/ui_control.c"
 UI_CONTROL_H = ROOT / "firmware/components/ui_status/include/ui_control.h"
+UI_FACE_PICKER_C = ROOT / "firmware/components/ui_status/ui_face_picker.c"
+UI_STATUS_H = ROOT / "firmware/components/ui_status/include/ui_status.h"
 VERSION_TXT = ROOT / "firmware/version.txt"
 README = ROOT / "README.md"
 PROTOCOL = ROOT / "docs/protocol.md"
@@ -304,6 +306,33 @@ def check_watch_tiles() -> None:
     compare("uhr-kacheln", PROTOCOL, "Kacheln des Kontrollzentrums (Voreinstellung)", doc, code)
 
 
+def check_watch_faces() -> None:
+    """Welche Namen `watch_settings.face` und `face_layout` kennen (0.4.4).
+
+    Die Namen stehen in FACE_LAYOUT_NAMES (ui_face_picker.c), in der
+    Reihenfolge der Aufzaehlung ui_face_layout_t (ui_status.h); das Protokoll
+    nennt sie in derselben Reihenfolge. Ein Layout, das nur im Code steht,
+    kennte keine Bruecke.
+    """
+    source = UI_FACE_PICKER_C.read_text(encoding="utf-8")
+    names = re.search(r"FACE_LAYOUT_NAMES\[UI_FACE_COUNT\]\s*=\s*\{(.*?)\};", source, re.S)
+    enum = re.search(r"typedef enum \{(.*?)\} ui_face_layout_t;",
+                     UI_STATUS_H.read_text(encoding="utf-8"), re.S)
+    if not names or not enum:
+        fail("uhr-layouts", PROTOCOL, "FACE_LAYOUT_NAMES oder ui_face_layout_t nicht lesbar")
+        return
+    code = re.findall(r'"([a-z_]+)"', names.group(1))
+    aufzaehlung = [n for n in re.findall(r"^\s*UI_FACE_(\w+)", enum.group(1), re.M)
+                   if n != "COUNT"]
+    if len(code) != len(aufzaehlung):
+        fail("uhr-layouts", PROTOCOL,
+             f"FACE_LAYOUT_NAMES ({len(code)}) und ui_face_layout_t ({len(aufzaehlung)}) "
+             "sind verschieden lang")
+        return
+    doc = re.findall(r"`([a-z_]+)`", region(PROTOCOL, "uhr-layouts"))
+    compare("uhr-layouts", PROTOCOL, "Zifferblatt-Layouts (`face`)", doc, code)
+
+
 # --- Abhaengigkeiten: README gegen die idf_component.yml -------------------
 
 def check_dependencies() -> None:
@@ -372,7 +401,7 @@ def check_heimat() -> None:
 
 def main() -> int:
     checks = (check_gatt, check_device_info, check_button_roles, check_button_roles_watch,
-              check_font_steps, check_watch_tiles,
+              check_font_steps, check_watch_tiles, check_watch_faces,
               check_dependencies, check_heimat)
     for check in checks:
         try:

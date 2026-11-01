@@ -227,6 +227,31 @@ static bool s_battery_low;
 static char s_battery_remaining[24];
 /* Nachtlade-Modus: nur die grosse Uhrzeit, dunkelgrau (ui_status_set_night_mode). */
 static bool s_night_mode;
+/*
+ * Nachtmodus-Fenster (0.4.4, `watch_settings.night`): das Zifferblatt in
+ * gedaempftem Rot -- alle drei Layouts, auch im Nachtlade-Modus. Andere
+ * Szenen bleiben farbig. `s_face_red_shown` sagt, ob das zuletzt gezeichnete
+ * Zifferblatt rot war; Akkuzahl und Zeilen faerben sich danach.
+ */
+static bool s_night_red;
+static bool s_face_red_shown;
+#define NIGHT_RED_TEXT 0xb0301c
+#define NIGHT_RED_MUTED 0x6a1d10
+/* Layout des Zifferblatts (`watch_settings.face`, 0.4.4) -- nur die Uhr wertet es aus. */
+static ui_face_layout_t s_face_layout = UI_FACE_INFO;
+/* Stand beim letzten Zeichnen das Zifferblatt? Fuer den langen Druck (main.c). */
+static bool s_face_shown;
+/*
+ * "Denkt nach" mit Sekundenzaehler (0.4.4): seit wann gedacht wird
+ * (esp_timer-Mikrosekunden, 0 = kein Zaehler) und der Sekundentakt dazu.
+ * Der Takt laeuft nur in der Denk-Szene; sonst pausiert er.
+ */
+static int64_t s_thinking_since_us;
+static lv_timer_t *s_thinking_timer;
+#define THINKING_COUNTER_FROM_S 5
+static const char *thinking_status_locked(ui_status_icon_scene_t scene, const char *base);
+/* Schirm ganz aus (nur die Uhr): dann zaehlt der Sekundentakt nicht sichtbar mit. */
+static bool s_display_is_off;
 static bool s_battery_charging;
 /* Gedaempfte Farbe der laufenden Szene — hell auf Creme, blass auf Dunkel. */
 static lv_color_t s_muted_colour;
@@ -391,6 +416,14 @@ static uint8_t s_chip_count;
  */
 #define CLOCK_CELLS 5
 static lv_obj_t *s_clock_cell[CLOCK_CELLS];
+/*
+ * Die anderen Layouts (0.4.4): "Gross" zeigt Stunden und Minuten in zwei
+ * Zeilen der 180er, "Minimal" das Datum unter der Uhrzeit und den Akku als
+ * Punkt. Lage setzt render_alt_face_locked().
+ */
+static lv_obj_t *s_large_label[2];
+static lv_obj_t *s_face_date;
+static lv_obj_t *s_battery_dot;
 /* Verlauf im NVS: gebuendelt schreiben, hoechstens einmal je 30 s. */
 static esp_timer_handle_t s_history_save_timer;
 static bool s_history_dirty;
@@ -1180,11 +1213,24 @@ static void apply_battery_colour_locked(void)
     if (!s_battery_label) {
         return;
     }
+    /* Nachts auf dem Zifferblatt rot gedaempft -- nur das Akku-Rot bleibt Rot. */
     lv_obj_set_style_text_color(s_battery_label,
                                 s_battery_low ? lv_color_hex(0xf97373) :
+                                s_face_red_shown ? lv_color_hex(NIGHT_RED_MUTED) :
                                 s_battery_charging ? lv_color_hex(0x5ec4ff) :
                                 s_muted_colour,
                                 0);
+#if UI_WATCH
+    /* Der Akku-Punkt des Layouts "Minimal": gruen, ab 20 % gelb, ab 10 % rot, am Kabel blau. */
+    if (s_battery_dot) {
+        const uint32_t dot = s_battery_low ? 0xe74c3c :
+                             s_face_red_shown ? NIGHT_RED_MUTED :
+                             s_battery_charging ? 0x5ec4ff :
+                             s_battery_percent >= 0 && s_battery_percent <= 20 ? 0xf2b23c :
+                             0x2ecc71;
+        lv_obj_set_style_bg_color(s_battery_dot, lv_color_hex(dot), 0);
+    }
+#endif
 }
 
 #if UI_WATCH
@@ -1471,14 +1517,16 @@ static void render_face_lines_locked(bool visible, const char *event_line)
     }
     if (event_line[0]) {
         lv_label_set_text(s_face_label[row], event_line);
-        lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0x5ec4ff), 0);
+        lv_obj_set_style_text_color(s_face_label[row],
+                                    lv_color_hex(s_face_red_shown ? NIGHT_RED_TEXT : 0x5ec4ff), 0);
         lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP);
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
         row++;
     }
     for (int i = 0; i < s_face_count && row < FACE_LABELS - 1; i++, row++) {
         lv_label_set_text(s_face_label[row], s_face[i]);
-        lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0xc9d1d9), 0);
+        lv_obj_set_style_text_color(s_face_label[row],
+                                    lv_color_hex(s_face_red_shown ? NIGHT_RED_MUTED : 0xc9d1d9), 0);
         lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + row * FACE_LINE_H);
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
     }
@@ -1490,6 +1538,108 @@ static void render_face_lines_locked(bool visible, const char *event_line)
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
     }
 }
+
+#if UI_WATCH
+/*
+ * Die zwei anderen Layouts des Zifferblatts (0.4.4). "Minimal": die Uhrzeit
+ * in Zellen wie gewohnt, nur tiefer, darunter das Datum ("So 1.11.") und der
+ * Akku als Punkt -- keine Zeilen, kein Termin, kein Tecki. "Gross": Stunden
+ * und Minuten untereinander in der 180er, darunter genau eine Zeile -- der
+ * Termin, sonst die erste Zeile der Bruecke; der Akku bleibt klein oben.
+ */
+#define MINIMAL_CLOCK_Y 150
+#define MINIMAL_DATE_Y (MINIMAL_CLOCK_Y + 87 + 18)
+#define MINIMAL_DOT 16
+#define MINIMAL_DOT_Y (MINIMAL_DATE_Y + 36 + 22)
+#define LARGE_HH_Y (HEADER_H + 14)
+#define LARGE_MM_Y (LARGE_HH_Y + 136)
+#define LARGE_LINE_Y (LARGE_MM_Y + 130 + 24)
+
+/* "So 1.11." in Ortszeit; leer, solange die Uhr nicht gestellt ist. */
+static void format_face_date(char *out, size_t size)
+{
+    static const char *const WEEKDAYS[7] = { "So", "Mo", "Di", "Mi", "Do", "Fr", "Sa" };
+    out[0] = '\0';
+    if (!s_clock_valid) {
+        return;
+    }
+    const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&now, &parts);
+    snprintf(out, size, "%s %u.%u.", WEEKDAYS[parts.tm_wday % 7], (unsigned)parts.tm_mday % 32u,
+             (unsigned)(parts.tm_mon + 1) % 13u);
+}
+
+static void hide_alt_face_locked(void)
+{
+    for (int i = 0; i < 2; i++) {
+        if (s_large_label[i]) {
+            lv_obj_add_flag(s_large_label[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_face_date) {
+        lv_obj_add_flag(s_face_date, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_battery_dot) {
+        lv_obj_add_flag(s_battery_dot, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void render_alt_face_locked(ui_face_layout_t layout, const char *clock_text,
+                                   const char *event_line)
+{
+    hide_alt_face_locked();
+    render_face_lines_locked(false, "");
+    if (!s_large_label[0] || !s_face_date || !s_battery_dot) {
+        return;
+    }
+    if (layout == UI_FACE_MINIMAL) {
+        s_clock_col_x = 0;
+        s_clock_col_w = CONTENT_W;
+        s_clock_col_y = MINIMAL_CLOCK_Y;
+        s_clock_cells_shown = true;
+        place_clock_label_locked(clock_text);
+        static char date[24]; /* unter s_lvgl_lock */
+        format_face_date(date, sizeof(date));
+        lv_label_set_text(s_face_date, date);
+        lv_obj_align(s_face_date, LV_ALIGN_TOP_MID, 0, MINIMAL_DATE_Y);
+        if (date[0]) {
+            lv_obj_remove_flag(s_face_date, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_align(s_battery_dot, LV_ALIGN_TOP_MID, 0, MINIMAL_DOT_Y);
+        if (s_battery_percent >= 0) {
+            lv_obj_remove_flag(s_battery_dot, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    /* Gross: die Uhrzeit nicht in Zellen, sondern als zwei Zeilen "HH" und "MM". */
+    hide_clock_locked();
+    s_clock_cells_shown = false;
+    strlcpy(s_clock_text, clock_text, sizeof(s_clock_text));
+    const bool full = strlen(clock_text) == CLOCK_CELLS;
+    for (int i = 0; i < 2; i++) {
+        const size_t at = i == 0 ? 0 : 3;
+        const char part[3] = { full ? clock_text[at] : '-', full ? clock_text[at + 1] : '-',
+                               '\0' };
+        lv_label_set_text(s_large_label[i], part);
+        lv_obj_align(s_large_label[i], LV_ALIGN_TOP_MID,
+                     ink_center_shift(UI_FONT_CLOCK_LARGE, part), i == 0 ? LARGE_HH_Y : LARGE_MM_Y);
+        lv_obj_remove_flag(s_large_label[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    const bool is_event = event_line[0] != '\0';
+    const char *line = is_event ? event_line : s_face_count > 0 ? s_face[0] : "";
+    if (line[0] && s_face_label[0]) {
+        lv_label_set_text(s_face_label[0], line);
+        lv_obj_set_style_text_color(
+            s_face_label[0],
+            lv_color_hex(is_event ? (s_face_red_shown ? NIGHT_RED_TEXT : 0x5ec4ff)
+                                  : (s_face_red_shown ? NIGHT_RED_MUTED : 0xc9d1d9)),
+            0);
+        lv_obj_align(s_face_label[0], LV_ALIGN_TOP_MID, 0, LARGE_LINE_Y);
+        lv_obj_remove_flag(s_face_label[0], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+#endif
 
 /*
  * Welche Pose Tecki tatsaechlich zeigt.
@@ -1558,9 +1708,17 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     const bool with_clock = clock_scene(scene, s_text_kind);
     const bool clock_only = clock_only_scene(scene, s_text_kind, hint);
+    /* Denk-Szene: ab fuenf Sekunden mit Zaehler ("Erledige ... 7 s"). */
+    status = thinking_status_locked(scene, status ? status : "");
     /* Nachtlade-Modus: nur auf dem Ziffernblatt, nur die Uhrzeit, dunkelgrau. */
     const bool night = UI_WATCH && s_night_mode && clock_only;
+    /* Nachtmodus-Fenster (0.4.4): das Zifferblatt rot; der Nachtlade-Modus bleibt, nur rot. */
+    const bool red = UI_WATCH && s_night_red && clock_only;
+    /* Das Layout gilt nur fuer das Zifferblatt; der Nachtlade-Modus hat Vorrang. */
+    const ui_face_layout_t layout = UI_WATCH && clock_only && !night ? s_face_layout : UI_FACE_INFO;
     s_main_clock_shown = with_clock;
+    s_face_shown = clock_only;
+    s_face_red_shown = red;
 
     const char *body_text = hint ? hint : "";
     /*
@@ -1616,6 +1774,9 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                             clock_only ? CLOCK_FACE_TECKI_X : TECKI_X,
                             clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
     ui_status_icons_apply(&s_icons, icon_scene_for(scene, clock_only));
+    if (red) {
+        ui_status_icons_tint(&s_icons, NIGHT_RED_TEXT, NIGHT_RED_MUTED);
+    }
 
     const char *question_text = (question && question[0] && !clock_only) ? question : "";
     const text_layout_t plan = plan_text_layout(status, question_text, body_text, s_text_kind);
@@ -1630,7 +1791,9 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         status_shown = "Fehler";
     }
 
-    ui_status_icons_show(&s_icons, (clock_only || plan.tecki) && !night);
+    /* Auf dem Zifferblatt steht Tecki nur im Layout "Info". */
+    ui_status_icons_show(&s_icons,
+                         (clock_only ? layout == UI_FACE_INFO : plan.tecki) && !night);
 
     /*
      * Die Zeile ueber dem Text: die Frage, wenn es eine gibt, sonst das
@@ -1673,15 +1836,28 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         format_event(event_line, sizeof(event_line));
         const bool face_info = clock_only && !night && s_face_label[0] != NULL &&
                                (s_face_count > 0 || event_line[0] || s_battery_remaining[0]);
-        s_clock_col_x = clock_only ? 0 : plan.x;
-        s_clock_col_w = clock_only ? CONTENT_W : plan.width;
-        s_clock_col_y = clock_only ? CLOCK_FACE_Y : CLOCK_Y;
-        s_clock_cells_shown = UI_WATCH && clock_only;
-        place_clock_label_locked(clock_text);
-        render_face_lines_locked(face_info, event_line);
+#if UI_WATCH
+        if (layout != UI_FACE_INFO) {
+            render_alt_face_locked(layout, clock_text, event_line);
+        } else
+#endif
+        {
+#if UI_WATCH
+            hide_alt_face_locked();
+#endif
+            s_clock_col_x = clock_only ? 0 : plan.x;
+            s_clock_col_w = clock_only ? CONTENT_W : plan.width;
+            s_clock_col_y = clock_only ? CLOCK_FACE_Y : CLOCK_Y;
+            s_clock_cells_shown = UI_WATCH && clock_only;
+            place_clock_label_locked(clock_text);
+            render_face_lines_locked(face_info, event_line);
+        }
     } else {
         hide_clock_locked();
         render_face_lines_locked(false, "");
+#if UI_WATCH
+        hide_alt_face_locked();
+#endif
     }
 
     lv_label_set_text(s_hint_label, body_text);
@@ -1873,6 +2049,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * anders als zwei aehnlich helle Farbtoene.
      */
     lv_color_t ble = error ? lv_color_hex(0xf97373) :
+                     red ? lv_color_hex(NIGHT_RED_MUTED) :
                      s_link_connected ? lv_color_hex(0x55c98a) :
                      lv_color_hex(0x8fb8ff);
 
@@ -1883,21 +2060,33 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, question_text[0] ? muted : text, 0);
-    const lv_color_t clock_colour = night ? lv_color_hex(0x3a4656) : text;
+    const lv_color_t clock_colour = night ? lv_color_hex(red ? NIGHT_RED_MUTED : 0x3a4656) :
+                                    red ? lv_color_hex(NIGHT_RED_TEXT) : text;
     lv_obj_set_style_text_color(s_clock_label, clock_colour, 0);
 #if UI_WATCH
     for (int i = 0; i < CLOCK_CELLS; i++) {
         lv_obj_set_style_text_color(s_clock_cell[i], clock_colour, 0);
     }
+    for (int i = 0; i < 2; i++) {
+        lv_obj_set_style_text_color(s_large_label[i], clock_colour, 0);
+    }
+    lv_obj_set_style_text_color(s_face_date, red ? lv_color_hex(NIGHT_RED_MUTED) : muted, 0);
     lv_obj_set_style_text_color(s_meta_label, muted, 0);
 #endif
-    /* Nachts am Kabel bleibt auch die Kopfzeile dunkel: nur die Ziffern. */
+    /*
+     * Nachts am Kabel bleibt auch die Kopfzeile dunkel: nur die Ziffern.
+     * Im Layout "Minimal" steht der Akku als Punkt unter dem Datum statt als Zahl oben.
+     */
     if (night) {
         lv_obj_add_flag(s_ble_dot, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_remove_flag(s_ble_dot, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+        if (layout == UI_FACE_MINIMAL) {
+            lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     s_muted_colour = muted;
@@ -1979,16 +2168,55 @@ static void clock_tick_cb(lv_timer_t *timer)
     char now[8];
     format_clock(now, sizeof(now));
     if (strcmp(now, s_clock_text) != 0) {
-        /* Neue Ziffern, neue Tintenkanten: Lage mit dem Text nachziehen. */
-        place_clock_label_locked(now);
+#if UI_WATCH
         /*
          * Einmal je Minute alles nachziehen: der Termin-Countdown laeuft,
-         * und um 22 Uhr schlaeft Tecki ein. Seltener als die Ziffern selbst
-         * ist es ohnehin nicht noetig.
+         * um 22 Uhr schlaeft Tecki ein, und das Datum im Layout "Minimal"
+         * wechselt um Mitternacht. Das Zeichnen setzt auch die Ziffern --
+         * in jedem Layout an ihrer Stelle (seit 0.4.4 nicht mehr immer in
+         * Zellen).
          */
-#if UI_WATCH
         render_current_locked();
+#else
+        /* Neue Ziffern, neue Tintenkanten: Lage mit dem Text nachziehen. */
+        place_clock_label_locked(now);
 #endif
+    }
+}
+
+/*
+ * Die Zeile der Denk-Szene, ab fuenf Sekunden mit Zaehler: "Erledige ... 7 s".
+ * `base` ist die Zeile ohne Zaehler (schon Latin-1-tauglich).
+ */
+static const char *thinking_status_locked(ui_status_icon_scene_t scene, const char *base)
+{
+    static char line[UI_STATUS_TEXT_MAX + 16]; /* unter s_lvgl_lock */
+    if (s_thinking_since_us <= 0 || scene != UI_STATUS_ICON_TRANSCRIBING) {
+        return base;
+    }
+    const int64_t elapsed_s = (esp_timer_get_time() - s_thinking_since_us) / 1000000;
+    if (elapsed_s < THINKING_COUNTER_FROM_S) {
+        return base;
+    }
+    snprintf(line, sizeof(line), "%s %u s", base, (unsigned)(elapsed_s % 1000));
+    return line;
+}
+
+/*
+ * Sekundentakt der Denk-Szene: nur die Statuszeile neu, nicht die ganze
+ * Szene. Bei dunklem oder ausgeschaltetem Schirm zaehlt er still weiter --
+ * der naechste Blick zeigt den richtigen Stand.
+ */
+static void thinking_tick_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_ready || s_dimmed || s_display_is_off || s_thinking_since_us <= 0 ||
+        s_scene != UI_STATUS_ICON_TRANSCRIBING || s_question_text[0]) {
+        return;
+    }
+    const char *line = thinking_status_locked(s_scene, s_status_text);
+    if (strcmp(line, lv_label_get_text(s_status_label)) != 0) {
+        lv_label_set_text(s_status_label, line);
     }
 }
 
@@ -2116,6 +2344,20 @@ static void create_status_ui(void)
         lv_obj_add_flag(s_clock_cell[i], LV_OBJ_FLAG_HIDDEN);
     }
 
+    /* Layout "Gross": Stunden und Minuten; "Minimal": Datum und Akku-Punkt (0.4.4). */
+    for (int i = 0; i < 2; i++) {
+        s_large_label[i] = lv_label_create(s_screen);
+        lv_label_set_text(s_large_label[i], "");
+        lv_obj_set_style_text_font(s_large_label[i], UI_FONT_CLOCK_LARGE, 0);
+        lv_obj_add_flag(s_large_label[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    s_face_date = lv_label_create(s_screen);
+    lv_label_set_text(s_face_date, "");
+    lv_obj_set_style_text_font(s_face_date, UI_FONT_STATUS, 0);
+    lv_obj_add_flag(s_face_date, LV_OBJ_FLAG_HIDDEN);
+    s_battery_dot = create_blob(s_screen, MINIMAL_DOT, MINIMAL_DOT, lv_color_hex(0x2ecc71));
+    lv_obj_add_flag(s_battery_dot, LV_OBJ_FLAG_HIDDEN);
+
     /* Die kleine Uhrzeit oben mittig; lv_layer_top() kennt keinen Rand, daher + Rand. */
     s_header_clock = lv_label_create(lv_layer_top());
     lv_label_set_text(s_header_clock, "--:--");
@@ -2174,6 +2416,9 @@ static void create_status_ui(void)
      * Sperre also nicht selbst zu nehmen.
      */
     lv_timer_create(clock_tick_cb, CLOCK_TICK_MS, NULL);
+    /* Der Sekundentakt der Denk-Szene schlaeft, bis gedacht wird (ui_status_set_thinking). */
+    s_thinking_timer = lv_timer_create(thinking_tick_cb, 1000, NULL);
+    lv_timer_pause(s_thinking_timer);
 
     s_ready = true;
     render_current_locked();
@@ -2355,6 +2600,10 @@ static void assign_scene_locked(ui_status_icon_scene_t scene, const char *status
     s_shortable = shortable;
     s_expanded = false;
     end_transcript_locked();
+    s_thinking_since_us = 0;
+    if (s_thinking_timer) {
+        lv_timer_pause(s_thinking_timer);
+    }
     s_scene = scene;
     s_text_kind = kind;
     copy_utf8_display(s_status_text, status ? status : "", sizeof(s_status_text));
@@ -2521,6 +2770,7 @@ void ui_status_set_display_off(bool off)
         return;
     }
     _lock_acquire(&s_lvgl_lock);
+    s_display_is_off = off;
     lv_timer_t *refr = lv_display_get_refr_timer(s_display);
     if (off) {
         ui_display_watch206_sleep();
@@ -3271,6 +3521,22 @@ lv_obj_t *ui_status_screen(void)
     return s_screen;
 }
 
+void ui_status_format_clock(char *out, size_t size)
+{
+    format_clock(out, size);
+}
+
+void ui_status_format_date(char *out, size_t size)
+{
+#if UI_WATCH
+    format_face_date(out, size);
+#else
+    if (size > 0) {
+        out[0] = '\0';
+    }
+#endif
+}
+
 void ui_status_copy_display_text(char *dst, const char *src, size_t size)
 {
     copy_utf8_display(dst, src, size);
@@ -3492,9 +3758,14 @@ void ui_status_set_recording(uint32_t session_id)
     end_transcript_locked();
     s_shortable = false;
     s_expanded = false;
+    s_thinking_since_us = 0;
+    if (s_thinking_timer) {
+        lv_timer_pause(s_thinking_timer);
+    }
     s_scene = UI_STATUS_ICON_RECORDING;
     s_text_kind = UI_TEXT_HINT;
-    strlcpy(s_status_text, "Hört zu", sizeof(s_status_text));
+    /* "Höre zu" seit 0.4.4 (Paket I) -- die Uhr spricht in der ersten Person wie "Verstehe ...". */
+    copy_utf8_display(s_status_text, "Höre zu", sizeof(s_status_text));
     strlcpy(s_hint_text, "Sprich jetzt", sizeof(s_hint_text));
     render_current_locked();
     _lock_release(&s_lvgl_lock);
@@ -3556,6 +3827,51 @@ void ui_status_set_night_mode(bool on)
 bool ui_status_night_mode(void)
 {
     return s_night_mode;
+}
+
+void ui_status_set_night_red(bool on)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_night_red != on) {
+        s_night_red = on;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+void ui_status_set_face_layout(ui_face_layout_t layout)
+{
+    if ((int)layout < 0 || layout >= UI_FACE_COUNT) {
+        layout = UI_FACE_INFO;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    if (s_face_layout != layout) {
+        s_face_layout = layout;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+bool ui_status_face_shown(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool shown = s_face_shown && !s_dimmed;
+    _lock_release(&s_lvgl_lock);
+    return shown;
+}
+
+void ui_status_set_thinking(const char *status, const char *text, int64_t since_us)
+{
+    ESP_LOGD(TAG, "thinking: %s", status ? status : "");
+    _lock_acquire(&s_lvgl_lock);
+    assign_scene_locked(UI_STATUS_ICON_TRANSCRIBING, status ? status : "Denkt nach", "",
+                        text ? text : "", UI_TEXT_MESSAGE, "", false);
+    s_thinking_since_us = since_us;
+    if (s_thinking_timer && since_us > 0) {
+        lv_timer_resume(s_thinking_timer);
+    }
+    render_current_locked();
+    _lock_release(&s_lvgl_lock);
 }
 
 void ui_status_set_partial_text(const char *text)
