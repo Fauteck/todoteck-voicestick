@@ -144,7 +144,7 @@ def check_device_info() -> None:
 
     doc = region(PROTOCOL, "device-info")
 
-    for feld in ("hardware", "buttons", "interaction_modes", "ui_states"):
+    for feld in ("hardware", "ui_states"):
         code_wert = re.search(rf'"{feld}":(\[[^\]]*\]|"[^"]*")', json_code)
         doku_wert = re.search(rf'"{feld}":(\[[^\]]*\]|"[^"]*")', doc)
         if not code_wert or not doku_wert:
@@ -162,6 +162,16 @@ def check_device_info() -> None:
     else:
         compare("device-info", PROTOCOL, "`firmware_version`",
                 version_doc.group(1), version_code)
+
+    # Die Meldung muss in eine Benachrichtigung passen (MTU 247 -> 244 Byte,
+    # davon 4 Byte Kopf). Bis 0.3.3 waren es 252, und NimBLE verwarf sie still.
+    laengste = max(kennungen.values(), key=len)
+    probe = json_code.replace(kennungen["stick_s3"], laengste).replace("%s", version_code + "-dev")
+    if len(probe.encode("utf-8")) + 4 > 244:
+        failures.append(
+            f"firmware/components/voice_ble/voice_ble.c [device-info]: device_info ist "
+            f"{len(probe.encode('utf-8')) + 4} Byte samt Kopf, passt nicht in 244"
+        )
 
     # Angekuendigte Zustaende muessen auch angenommen werden.
     announced = re.findall(r'"([a-z_]+)"', re.search(r'"ui_states":\[([^\]]*)\]', json_code).group(1))
