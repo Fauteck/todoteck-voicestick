@@ -354,18 +354,42 @@ static esp_err_t sensor_create(void)
 
 static esp_err_t int_pin_create(void)
 {
+    /*
+     * Der Interrupt wird hier noch NICHT konfiguriert (GPIO_INTR_DISABLE):
+     * gpio_config() ruft in IDF 5.5.1 am Ende gpio_intr_enable() -- mit
+     * .intr_type = GPIO_INTR_LOW_LEVEL waere der Pegel-Interrupt scharf,
+     * bevor gpio_isr_handler_add() den Handler einhaengt. Liegt GPIO21 in
+     * dem Moment auf 0 (der Sensor treibt INT1 erst mit scharfem WoM auf
+     * Ruhepegel 1, davor floatet die Leitung), feuert der Interrupt nach
+     * gpio_install_isr_service() endlos: gpio_isr_loop findet keinen
+     * Handler, loescht das Status-Bit, der Pegel bleibt 0, sofort wieder --
+     * Interrupt-Watchdog nach 300 ms, Panic, OTA-Rueckfall. So stuerzte
+     * 0.4.1 beim Start ab. Die Art des Interrupts setzt gpio_set_intr_type()
+     * unten, nachdem der Handler steht und der Interrupt aus ist -- wie
+     * init_pmic_irq() in main.c fuer den StickS3.
+     *
+     * Pull-up, obwohl der Sensor Push-Pull treibt: Der Ruhepegel der
+     * WoM-Leitung ist 1, und solange der Sensor sie nicht treibt (vor dem
+     * Scharfschalten, im Tiefschlaf), haelt der Pull-up sie oben statt sie
+     * schweben zu lassen.
+     */
     const gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << WOM_INT_GPIO,
         .mode = GPIO_MODE_INPUT,
-        /* Push-Pull-Ausgang des Sensors: keine Widerstaende, die dagegen ziehen. */
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_LOW_LEVEL,
+        .intr_type = GPIO_INTR_DISABLE,
     };
     esp_err_t err = gpio_config(&cfg);
     if (err != ESP_OK) {
         return err;
     }
+    /*
+     * Flags 0, nicht ESP_INTR_FLAG_IRAM: wom_isr ruft Code im Flash
+     * (gpio_intr_disable, xSemaphoreGiveFromISR). Auf der Uhr ist das der
+     * erste Aufruf von gpio_install_isr_service -- Touch und Tasten kommen
+     * spaeter und nehmen den Dienst, wie er ist (ESP_ERR_INVALID_STATE).
+     */
     err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
@@ -374,8 +398,12 @@ static esp_err_t int_pin_create(void)
     if (err != ESP_OK) {
         return err;
     }
-    /* Scharf erst mit watch(true). */
+    /* Handler steht, Interrupt aus; jetzt die Art setzen. Scharf erst mit watch(true). */
     gpio_intr_disable(WOM_INT_GPIO);
+    err = gpio_set_intr_type(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
+    if (err != ESP_OK) {
+        return err;
+    }
     /*
      * Dieselbe Leitung weckt aus dem Light Sleep: Ohne das wuerde der Chip
      * den Interrupt erst beim naechsten ohnehin faelligen Aufwachen sehen --
