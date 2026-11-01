@@ -26,6 +26,7 @@ LV_FONT_DECLARE(todoteck_watch_font_23);
 LV_FONT_DECLARE(todoteck_watch_font_20);
 LV_FONT_DECLARE(todoteck_watch_font_18);
 LV_FONT_DECLARE(todoteck_watch_clock_120);
+LV_FONT_DECLARE(todoteck_watch_clock_180);
 LV_FONT_DECLARE(todoteck_clock_64);
 
 #define LCD_H_RES 410
@@ -104,6 +105,11 @@ LV_FONT_DECLARE(todoteck_clock_64);
 #define UI_FONT_QUESTION (&todoteck_watch_font_20)
 #define UI_FONT_SMALL (&todoteck_watch_font_18)
 #define UI_FONT_CLOCK_FACE (&todoteck_watch_clock_120)
+/*
+ * Layout "Gross" (0.4.4): Stunden und Minuten zweizeilig in 180 px -- nur
+ * Ziffern, Doppelpunkt und Strich wie die 120er, "00" misst rund 242 px.
+ */
+#define UI_FONT_CLOCK_LARGE (&todoteck_watch_clock_180)
 #define UI_FONT_CLOCK_SMALL (&todoteck_clock_64)
 
 /* Zeilenabstand je Stufe auf rund das 1,35-fache der Schriftgroesse. */
@@ -154,6 +160,9 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Kachel (2 x 3)         ui_control.c tile_at           183 x 134         x 107 / 302,     6
  *                                                                           y 127/273/419
  *   Ziffernblatt: Tippen   main.c handle_touch            ganzer Schirm     --               --
+ *   Ziffernblatt: lange    main.c handle_touch            ganzer Schirm     --               --
+ *   druecken (0.4.4)
+ *   Layout-Auswahl: Tippen ui_face_picker.c               ganzer Schirm     --               --
  *   Wetterkarte            ui_weather.c                   keine (reine Anzeige)
  *
  * Die schmalste Flaeche ist die "Tippen fuer mehr"-Flaeche mit 52 px. Die

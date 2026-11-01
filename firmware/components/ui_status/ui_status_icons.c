@@ -467,6 +467,24 @@ void ui_status_icons_set_box(ui_status_icons_t *icons, int32_t box, int32_t x, i
     }
 }
 
+void ui_status_icons_tint(ui_status_icons_t *icons, uint32_t mark, uint32_t eye)
+{
+    if (icons->root == NULL) {
+        return;
+    }
+    lv_obj_set_style_line_color(icons->body, lv_color_hex(mark), 0);
+    for (int i = 0; i < 2; i++) {
+        lv_obj_set_style_bg_color(icons->eye[i], lv_color_hex(eye), 0);
+        lv_obj_set_style_bg_color(icons->lid[i], lv_color_hex(eye), 0);
+    }
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_style_line_color(icons->cross[i], lv_color_hex(eye), 0);
+    }
+    for (int i = 0; i < UI_TECKI_THINK_DOTS; i++) {
+        lv_obj_set_style_bg_color(icons->dot[i], lv_color_hex(mark), 0);
+    }
+}
+
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene)
 {
     (void)icons;

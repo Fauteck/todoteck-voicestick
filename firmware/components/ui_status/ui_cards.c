@@ -14,11 +14,14 @@ static const char *TAG = "ui_cards";
 #define CARD_COLOUR_SET 0x01000000u
 
 /*
- * Gruppen einer Liste ("Angepinnt", "Ueberfaellig", "Heute", "Ausserdem
- * wichtig"): hoechstens vier Namen je Liste, jede Zeile traegt nur den Index
- * (0 = keine). So kostet die Ueberschrift je Liste 96 Byte statt 24 je Zeile.
+ * Gruppen einer Liste ("Termine", "Angepinnt", "Ueberfaellig", "Heute",
+ * "Ausserdem wichtig"): hoechstens fuenf Namen je Liste (bis 0.4.3 vier --
+ * "Termine" kam mit Paket I dazu), jede Zeile traegt nur den Index
+ * (0 = keine). So kostet die Ueberschrift je Liste 120 Byte statt 24 je Zeile.
  */
-#define CARD_GROUPS_MAX 4
+#define CARD_GROUPS_MAX 5
+/* Termine (Flag `e`, 0.4.4) tragen statt der Projektfarbe einen Streifen in Kalender-Blau. */
+#define CARD_EVENT_COLOUR 0x3b82f6u
 #define CARD_GROUP_LEN 24
 
 typedef struct {
@@ -27,6 +30,7 @@ typedef struct {
     uint32_t colour;  /* Projektfarbe (nur `today`), CARD_COLOUR_SET wenn gesetzt */
     uint8_t group;    /* 1..CARD_GROUPS_MAX in `groups`, 0 = keine */
     bool confirm;     /* Schalter: erst markieren, dann "OK - schalten" (Flag `c`) */
+    bool event;       /* Termin (Flag `e`): nicht antippbar, nur zum Lesen */
     bool done;        /* angetippt; die Bruecke hat es noch nicht bestaetigt */
 } card_item_t;
 
@@ -868,8 +872,9 @@ void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
         card_item_t *item = &list->items[list->count++];
         ui_status_copy_display_text(item->text, text ? text : "", sizeof(item->text));
         ui_status_copy_display_text(item->aux, aux ? aux : "", sizeof(item->aux));
-        item->colour = parse_colour(colour);
-        item->confirm = flags && strchr(flags, 'c') != NULL;
+        item->event = flags && strchr(flags, 'e') != NULL;
+        item->colour = item->event ? (CARD_EVENT_COLOUR | CARD_COLOUR_SET) : parse_colour(colour);
+        item->confirm = !item->event && flags && strchr(flags, 'c') != NULL;
         item->done = false;
         item->group = 0;
         if (group && group[0]) {
@@ -1093,6 +1098,7 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
             if (ok_distance >= 0 && (best < 0 || ok_distance <= best_distance)) {
                 const int index = s_sel.index;
                 const bool valid = list->rev == s_sel.rev && index < list->count &&
+                                   !list->items[index].event &&
                                    (s_kind == UI_CARD_SWITCHES || !list->items[index].done);
                 clear_selection_locked();
                 if (valid) {
@@ -1130,7 +1136,8 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
          * Zeile schickte sonst zweimal "erledigt". Schalter duerfen hin
          * und her.
          */
-        if (index < 0 || index >= list->count ||
+        /* Termine (Flag `e`) sind nur zum Lesen: kein Markieren, kein OK, kein `item`. */
+        if (index < 0 || index >= list->count || list->items[index].event ||
             (list->items[index].done && s_kind != UI_CARD_SWITCHES)) {
             /* Daneben getippt: eine Markierung verfaellt, gesendet wird nichts. */
             if (clear_selection_locked()) {

@@ -71,7 +71,8 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part);
  * `colour`: "#RRGGBB" (Projektfarbe, nur `today`) oder ""/NULL -- dann kein
  * Streifen. `group`: Ueberschrift der Gruppe ("Ueberfaellig", nur `today`),
  * ""/NULL = keine. `flags`: "c" = erst markieren, dann "OK" (Schalter mit
- * Bestaetigung); ""/NULL = direkt.
+ * Bestaetigung); "e" = Termin (0.4.4, nur `today`): nicht antippbar,
+ * Streifen in Kalender-Blau statt Projektfarbe; ""/NULL = direkt.
  */
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
                        const char *colour, const char *group, const char *flags);
