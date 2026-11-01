@@ -168,6 +168,8 @@ static bool s_answer_unread;
 static int64_t s_answer_at_us;
 /* Ab hier zaehlt ein Wischen nach unten als "vom oberen Rand" (absolute y). */
 #define TOP_EDGE_PX 80
+/* Bis hierher zaehlt ein Wischen nach rechts als "vom linken Rand": zurueck (absolute x). */
+#define BACK_EDGE_PX 30
 #endif
 /* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
 static bool s_action_fired;
@@ -1164,8 +1166,10 @@ static void apply_face_command(const cJSON *root)
  *   {"event":"list","kind":"today","rev":7,"part":0,"items":[["Pool messen","18:00","#2ecc71"]]}
  * Teil 0 leert die Karte; `rev` kommt mit jedem Tippen zurueck, damit die
  * Bruecke einen Index auf einer veralteten Liste nicht falsch zuordnet. Das
- * dritte Element ist die Projektfarbe ("#RRGGBB" oder ""); Bruecken vor dem
- * UI/UX-Paket lassen es weg.
+ * dritte Element ist die Projektfarbe ("#RRGGBB" oder ""), das vierte die
+ * Gruppenueberschrift (nur `today`), das fuenfte die Flags ("c" = Schalter
+ * mit Bestaetigung); was fehlt, gilt als "". Bruecken vor dem UI/UX-Paket
+ * schicken nur zwei.
  */
 static void apply_list_command(const cJSON *root)
 {
@@ -1185,10 +1189,14 @@ static void apply_list_command(const cJSON *root)
             const cJSON *text = cJSON_GetArrayItem(entry, 0);
             const cJSON *aux = cJSON_GetArrayItem(entry, 1);
             const cJSON *colour = cJSON_GetArrayItem(entry, 2);
+            const cJSON *group = cJSON_GetArrayItem(entry, 3);
+            const cJSON *flags = cJSON_GetArrayItem(entry, 4);
             if (cJSON_IsString(text)) {
                 ui_cards_add_item((ui_card_kind_t)kind, text->valuestring,
                                   cJSON_IsString(aux) ? aux->valuestring : "",
-                                  cJSON_IsString(colour) ? colour->valuestring : "");
+                                  cJSON_IsString(colour) ? colour->valuestring : "",
+                                  cJSON_IsString(group) ? group->valuestring : "",
+                                  cJSON_IsString(flags) ? flags->valuestring : "");
             }
         }
     }
@@ -1672,15 +1680,19 @@ static void handle_palm(void)
  *   ----------------  ---------------  ---------------------  ------------------  ---------------
  *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     schliesst
  *   nach unten
- *   nach unten        nichts           zurueck: Zifferblatt   Zifferblatt         schliesst
- *   nach oben         Karten           Karten                 naechste Seite      schliesst
+ *   vom linken Rand   Verlauf          Zifferblatt            Zifferblatt         Zifferblatt
+ *   nach rechts
+ *   nach unten        nichts           zurueck: Zifferblatt   Liste zurueck; am   schliesst
+ *                                                             Anfang: Zifferblatt
+ *   nach oben         Karten           Karten                 Liste weiter        schliesst
  *   links             Heute            neuer; von der         naechste Karte;     --
  *                                      juengsten: Zifferbl.   am Ende nichts
- *   rechts            Verlauf          aelter                 vorige Karte; von   --
- *                                                             Heute: Zifferblatt
- *   Tippen            Verlauf oeffnen  Ja/Nein; Kurzform <->  Zeile abhaken /     Kachel
- *                                      ganz; sonst aelter     schalten; Heute:
- *                                                             markieren, dann
+ *   rechts            Verlauf (zuerst  aelter                 vorige Karte; von   --
+ *                     die Bilanz)                             Heute: Zifferblatt
+ *   Tippen            Verlauf oeffnen  Ja/Nein; Nochmal /     Zeile abhaken /     Kachel
+ *                                      Rueckgaengig; Kurz-    schalten; Heute und
+ *                                      form <-> ganz; sonst   Schalter mit `c`:
+ *                                      aelter                 markieren, dann
  *                                                             "OK"; Rueckg.
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
  *
@@ -1792,6 +1804,20 @@ static void handle_touch(const app_event_t *event)
             ui_status_transcript_cancel_at(event->touch_x, event->touch_y)) {
             cancel_transcript();
         }
+        return;
+    }
+    /*
+     * Zurueck-Geste vom linken Rand (Paket G): Ein Wischen nach rechts, das
+     * am linken Rand beginnt, geht ueberall eine Ebene zurueck -- Karten,
+     * Wetter und Kontrollzentrum aufs Zifferblatt, der Verlauf ebenso. Auf
+     * dem Zifferblatt selbst gibt es nichts, wohin; dort bleibt es das
+     * normale Wischen nach rechts (in den Verlauf).
+     */
+    if (event->gesture == VOICE_BOARD_SWIPE_RIGHT && event->touch_x < BACK_EDGE_PX &&
+        (ui_control_visible() || ui_cards_visible() || ui_status_in_history())) {
+        ui_control_hide();
+        ui_cards_hide();
+        ui_status_show_home();
         return;
     }
     if (ui_control_visible()) {

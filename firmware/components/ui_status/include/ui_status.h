@@ -10,9 +10,9 @@
 #define UI_STATUS_CHOICES_MAX 3
 #define UI_STATUS_CHOICE_LEN 16
 
-/* Zeilen unter der Uhrzeit (nur die Uhr): hoechstens drei, je 40 Byte. */
+/* Zeilen unter der Uhrzeit (nur die Uhr): hoechstens drei, je 56 Byte (bis 0.3.6: 40). */
 #define UI_STATUS_FACE_LINES 3
-#define UI_STATUS_FACE_LEN 41
+#define UI_STATUS_FACE_LEN 57
 
 /*
  * Ergebnis eines Turns, wie die Bruecke es mit `ui_state` meldet

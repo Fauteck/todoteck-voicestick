@@ -3,13 +3,14 @@
 /*
  * Die Karten der Uhr: Heute, Einkauf, Zuhause.
  *
- * Erreichbar vom Ziffernblatt und aus dem Verlauf mit einem Wischen nach
- * oben; links/rechts wechselt die Karte, nach oben die naechste Seite, nach
- * unten eine Ebene zurueck. Ein Tippen auf eine Zeile hakt sie ab
- * (Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von der Bruecke,
- * die Karte zeigt es sofort. Auf Heute markiert das Tippen die Zeile nur;
- * abgehakt wird erst mit dem Chip "OK - erledigt" in der Zeile. Danach
- * steht fuenf Sekunden "Rueckgaengig".
+ * Erreichbar vom Ziffernblatt mit einem Wischen nach links (oder nach oben);
+ * links/rechts wechselt die Karte, nach oben scrollt die Liste weiter, nach
+ * unten zurueck -- am Anfang eine Ebene zurueck. Ein Tippen auf eine Zeile
+ * hakt sie ab (Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von
+ * der Bruecke, die Karte zeigt es sofort. Auf Heute (und bei Schaltern mit
+ * Flag `c`) markiert das Tippen die Zeile nur; ausgefuehrt wird erst mit
+ * dem Chip "OK - erledigt" / "OK - schalten" in der Zeile. Danach steht
+ * fuenf Sekunden "Rueckgaengig"; aus dem Verlauf geht es 15 Minuten.
  *
  * Die Inhalte schickt die Bruecke als `list`-Ereignis (docs/protocol.md).
  * Die Uhr kennt nur Texte und Positionen, keine IDs: Ein Tippen meldet
@@ -55,9 +56,14 @@ const char *ui_cards_kind_name(ui_card_kind_t kind);
 
 /* Eine Liste kommt in Teilen: Teil 0 leert sie, jeder Teil haengt an. */
 void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part);
-/* `colour`: "#RRGGBB" (Projektfarbe, nur `today`) oder ""/NULL -- dann kein Streifen. */
+/*
+ * `colour`: "#RRGGBB" (Projektfarbe, nur `today`) oder ""/NULL -- dann kein
+ * Streifen. `group`: Ueberschrift der Gruppe ("Ueberfaellig", nur `today`),
+ * ""/NULL = keine. `flags`: "c" = erst markieren, dann "OK" (Schalter mit
+ * Bestaetigung); ""/NULL = direkt.
+ */
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
-                       const char *colour);
+                       const char *colour, const char *group, const char *flags);
 /* Nach dem letzten Teil: neu zeichnen, falls die Karte gerade zu sehen ist. */
 void ui_cards_commit(ui_card_kind_t kind);
 
