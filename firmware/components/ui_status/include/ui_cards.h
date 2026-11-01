@@ -5,9 +5,11 @@
  *
  * Erreichbar vom Ziffernblatt und aus dem Verlauf mit einem Wischen nach
  * oben; links/rechts wechselt die Karte, nach oben die naechste Seite, nach
- * unten eine Ebene zurueck. Ein Tippen auf eine Zeile hakt sie ab (Heute,
- * Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von der Bruecke,
- * die Karte zeigt es sofort. Danach steht fuenf Sekunden "Rueckgaengig".
+ * unten eine Ebene zurueck. Ein Tippen auf eine Zeile hakt sie ab
+ * (Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von der Bruecke,
+ * die Karte zeigt es sofort. Auf Heute markiert das Tippen die Zeile nur;
+ * abgehakt wird erst mit dem Chip "OK - erledigt" in der Zeile. Danach
+ * steht fuenf Sekunden "Rueckgaengig".
  *
  * Die Inhalte schickt die Bruecke als `list`-Ereignis (docs/protocol.md).
  * Die Uhr kennt nur Texte und Positionen, keine IDs: Ein Tippen meldet
@@ -35,6 +37,7 @@ typedef enum {
     UI_CARDS_CLOSE,  /* eine Ebene zurueck (die Karten sind schon zu) */
     UI_CARDS_UNDO,   /* "Rueckgaengig" angetippt -- `hit` sagt, welche Zeile */
     UI_CARDS_END,    /* am Ende der Reihe weitergewischt -- nichts mehr rechts */
+    UI_CARDS_SELECT, /* Heute: Zeile markiert, wartet auf "OK" -- noch nichts senden */
 } ui_cards_action_t;
 
 typedef struct {

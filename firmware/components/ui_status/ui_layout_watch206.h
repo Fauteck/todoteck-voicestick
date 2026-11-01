@@ -141,6 +141,10 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Kartenzeile  normal    ui_cards.c ui_cards_touch      378 x 57          x 205            6
  *   Kartenzeile  gross     ui_cards.c ui_cards_touch      378 x 70          x 205            6
  *   Rueckgaengig           ui_cards.c ui_cards_touch      240 x 56          (205, 434)       6
+ *   OK - erledigt (Heute)  ui_cards.c ui_cards_touch      150 x 48/57/70    x 319, in der    6, Vorrang
+ *                                                                           markierten Zeile vor Zeilen
+ *                                                                           (y 104..428)     bei gleicher
+ *                                                                                            Mitte
  *   Kachel (2 x 3)         ui_control.c tile_at           183 x 134         x 107 / 302,     6
  *                                                                           y 127/273/419
  *   Ziffernblatt: Tippen   main.c handle_touch            ganzer Schirm     --               --
@@ -149,6 +153,8 @@ LV_FONT_DECLARE(todoteck_clock_64);
  * faellt aus (ROWS_BOTTOM - ROWS_TOP) / 7 - 6 = 382 / 7 - 6. Wer dort eine
  * achte Zeile will, unterschreitet die Regel. Die Ecken sind ueberall frei:
  * Selbst die aeusseren Ja/Nein-Flaechen liegen mit x 75 bzw. 333 weit
- * innerhalb.
+ * innerhalb. Der OK-Chip liegt rechts in der markierten Heute-Zeile und ist
+ * so hoch wie sie, erbt also deren 48 px; seine rechte Kante (x 394) reicht
+ * an den Rand, die Mitte (x 319) bleibt weit vor der Rundung.
  */
 #define UI_HIT_TOLERANCE 6
