@@ -24,8 +24,13 @@ uint8_t ui_status_font_level(void);
  */
 void ui_status_header_refresh_locked(void);
 
-/* Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte. */
+/*
+ * Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte von
+ * je UI_DOTS_SIZE px -- die Groesse steht hier, damit ui_cards.c die Reihe
+ * auf die Mitte der Kopfzeile setzen kann.
+ */
 #define UI_DOTS_MAX 5
+#define UI_DOTS_SIZE 8
 
 typedef struct {
     lv_obj_t *box;

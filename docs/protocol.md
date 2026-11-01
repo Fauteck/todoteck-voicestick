@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.5","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.6","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -287,7 +287,7 @@ reset them.
 
 | Field | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `font` | `"s"`, `"m"`, `"l"` | `"m"` | Answer text steps 26–18 / 30–18 / 30–23 px, card rows 20 / 23 / 26 px (7 / 6 / 5 per page), question line 18 / 20 / 23 px, transcript like the answer |
+| `font` | `"s"`, `"m"`, `"l"` | `"m"` | Answer text steps 26–18 / 30–18 / 30–23 px, card rows 20 / 23 / 26 px (6 / 5 / 5 per page, each row two text lines), question line 18 / 20 / 23 px, transcript like the answer |
 | `home_after_s` | `0` (never) or 10–600 | `30` | Back to the watch face after this long without input (closes cards, control centre, history). A new answer nobody has touched yet stays at least 120 s. Not during recording, thinking, an open question, the transcript, OTA or the torch |
 | `tiles` | ordered subset of <!-- doku-vertrag:uhr-kacheln -->`silent`, `brightness`, `cinema`, `saver`, `torch`, `battery`<!-- /doku-vertrag --> | all six in this order | Control-centre tiles in order; missing ones are hidden, the grid fills from the top (two columns). Unknown names are dropped, duplicates ignored, an empty list changes nothing |
 

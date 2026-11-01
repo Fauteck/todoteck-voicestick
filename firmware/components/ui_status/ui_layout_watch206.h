@@ -87,13 +87,17 @@ LV_FONT_DECLARE(todoteck_clock_64);
 #define CLOCK_HINT_Y (CONTENT_H - 40)
 
 /*
- * Das Ziffernblatt: Tecki klein unten mittig, die Uhrzeit mittig zwischen
- * Kopfzeile und Figur. "04:44" -- die breiteste Uhrzeit -- misst in der 120er
- * rund 354 der 378 Pixel.
+ * Das Ziffernblatt: Tecki klein unten mittig, die Uhrzeit oben an **einer**
+ * festen Stelle -- 36 px unter der Kopfzeile, ob nun Zeilen (Termin,
+ * Aufgabe, Wetter) darunter stehen oder nicht. Bis 0.3.5 rueckte sie ohne
+ * Zeilen in die Mitte zwischen Kopfzeile und Figur und sprang damit um gut
+ * 120 px, sobald die Bruecke eine Zeile schickte oder wieder zuruecknahm.
+ * Ohne Zeilen bleibt der Platz darunter frei. "04:44" -- die breiteste
+ * Uhrzeit -- misst in der 120er rund 354 der 378 Pixel.
  */
 #define CLOCK_FACE_TECKI_X ((CONTENT_W - UI_TECKI_BOX_SMALL) / 2)
 #define CLOCK_FACE_TECKI_Y (CONTENT_H - UI_TECKI_BOX_SMALL)
-#define CLOCK_FACE_Y (HEADER_H + (CONTENT_H - UI_TECKI_BOX_SMALL - HEADER_H - 87) / 2)
+#define CLOCK_FACE_Y (HEADER_H + 36)
 #define CLOCK_TICK_MS 10000
 
 #define UI_FONT_STATUS (&todoteck_watch_font_30)
@@ -137,24 +141,27 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Abbrechen (Transkript) ui_status.c transcript_cancel  346 x 64          (205, 450)       6
  *   "Tippen fuer mehr"     ui_status.c toggle_more        280 x 52          (205, 436..456)  ganzer
  *                                                                                            Schirm
- *   Kartenzeile  klein     ui_cards.c ui_cards_touch      378 x 48          x 205            6
- *   Kartenzeile  normal    ui_cards.c ui_cards_touch      378 x 57          x 205            6
- *   Kartenzeile  gross     ui_cards.c ui_cards_touch      378 x 70          x 205            6
+ *   Kartenzeile  klein     ui_cards.c ui_cards_touch      378 x 59          x 205            6
+ *   Kartenzeile  normal    ui_cards.c ui_cards_touch      378 x 72          x 205            6
+ *   Kartenzeile  gross     ui_cards.c ui_cards_touch      378 x 72          x 205            6
  *   Rueckgaengig           ui_cards.c ui_cards_touch      240 x 56          (205, 434)       6
- *   OK - erledigt (Heute)  ui_cards.c ui_cards_touch      150 x 48/57/70    x 319, in der    6, Vorrang
+ *   OK - erledigt (Heute)  ui_cards.c ui_cards_touch      150 x 59/72/72    x 319, in der    6, Vorrang
  *                                                                           markierten Zeile vor Zeilen
- *                                                                           (y 104..428)     bei gleicher
+ *                                                                           (y 101..427)     bei gleicher
  *                                                                                            Mitte
  *   Kachel (2 x 3)         ui_control.c tile_at           183 x 134         x 107 / 302,     6
  *                                                                           y 127/273/419
  *   Ziffernblatt: Tippen   main.c handle_touch            ganzer Schirm     --               --
  *
- * Die schmalste Flaeche ist die kleine Kartenzeile mit genau 48 px; sie
- * faellt aus (ROWS_BOTTOM - ROWS_TOP) / 7 - 6 = 382 / 7 - 6. Wer dort eine
- * achte Zeile will, unterschreitet die Regel. Die Ecken sind ueberall frei:
- * Selbst die aeusseren Ja/Nein-Flaechen liegen mit x 75 bzw. 333 weit
+ * Die schmalste Flaeche ist die "Tippen fuer mehr"-Flaeche mit 52 px. Die
+ * Kartenzeilen sind seit 0.3.6 auf zwei Textzeilen ausgelegt und damit
+ * hoeher als die Regel verlangt: Ihre Hoehe faellt aus dem verfuegbaren
+ * Platz (ROWS_BOTTOM - ROWS_TOP = 390) geteilt durch die Zeilen je Seite
+ * (klein 6, normal 5, gross 5 -- ui_cards.c rows_per_page), minus 6 px
+ * Luecke: 390 / 6 - 6 = 59 bzw. 390 / 5 - 6 = 72. Die Ecken sind ueberall
+ * frei: Selbst die aeusseren Ja/Nein-Flaechen liegen mit x 75 bzw. 333 weit
  * innerhalb. Der OK-Chip liegt rechts in der markierten Heute-Zeile und ist
- * so hoch wie sie, erbt also deren 48 px; seine rechte Kante (x 394) reicht
- * an den Rand, die Mitte (x 319) bleibt weit vor der Rundung.
+ * so hoch wie sie; seine rechte Kante (x 394) reicht an den Rand, die Mitte
+ * (x 319) bleibt weit vor der Rundung.
  */
 #define UI_HIT_TOLERANCE 6

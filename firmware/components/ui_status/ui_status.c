@@ -958,7 +958,7 @@ static bool make_short_form(char *out, size_t size, const char *text)
  * Punkte; ausgerichtet wird er einmal beim Anlegen (lv_obj_align merkt sich
  * die Ausrichtung, eine neue Breite verschiebt ihn also mit).
  */
-#define DOT_SIZE 8
+#define DOT_SIZE UI_DOTS_SIZE
 #define DOT_GAP 8
 
 void ui_dots_create(ui_dots_t *dots, lv_obj_t *parent)
@@ -1215,11 +1215,75 @@ static void format_event(char *out, size_t size)
 
 /*
  * Die Zeilen unter der Uhrzeit: zuerst der Termin (er laeuft ab), dann was
- * die Bruecke geschickt hat. Nur die Uhr legt die Labels an.
+ * die Bruecke geschickt hat. Nur die Uhr legt die Labels an. Sie haengen
+ * an der festen Stelle der Uhrzeit (CLOCK_FACE_Y) -- die Uhrzeit weicht
+ * ihnen nicht aus, sondern bleibt stehen, ob Zeilen da sind oder nicht.
  */
-#define FACE_CLOCK_Y (HEADER_H + 20)
-#define FACE_LINE_TOP (FACE_CLOCK_Y + 100)
+#define FACE_LINE_TOP (CLOCK_FACE_Y + 100)
 #define FACE_LINE_H 34
+
+/*
+ * Um wie viele Pixel ein zentriertes Label nach rechts muss (negativ: nach
+ * links), damit die **Tinte** der Zeile mittig steht und nicht die Summe
+ * der Vorschuebe. LVGL zentriert letztere; bei einer proportionalen Schrift
+ * liegt die Tinte darin nicht mittig -- die "1" der 120er traegt rechts
+ * 11 px Luft und links keine, "11:47" stand damit sichtbar links. Gerechnet
+ * wird mit den Glyphmassen der Schrift (Vorschub, Kasten, Versatz, alles in
+ * px, so wie lv_font_get_glyph_dsc sie liefert): linke Tintenkante ist der
+ * kleinste, rechte der groesste Kastenrand. Nur fuer ASCII -- die Uhrzeit
+ * besteht aus Ziffern, Doppelpunkt und Strich.
+ */
+static int32_t ink_center_shift(const lv_font_t *font, const char *text)
+{
+    int32_t pen = 0;
+    int32_t ink_left = 0;
+    int32_t ink_right = 0;
+    bool any = false;
+    for (size_t i = 0; text[i]; i++) {
+        lv_font_glyph_dsc_t g;
+        const uint32_t letter = (uint8_t)text[i];
+        const uint32_t next = (uint8_t)text[i + 1];
+        if (!lv_font_get_glyph_dsc(font, &g, letter, next)) {
+            continue;
+        }
+        const int32_t left = pen + g.ofs_x;
+        const int32_t right = left + g.box_w;
+        if (!any || left < ink_left) {
+            ink_left = left;
+        }
+        if (!any || right > ink_right) {
+            ink_right = right;
+        }
+        any = true;
+        pen += g.adv_w;
+    }
+    if (!any) {
+        return 0;
+    }
+    /* pen ist die Zeilenbreite, die LVGL mittig setzt. */
+    return (pen - ink_left - ink_right) / 2;
+}
+
+/*
+ * Die grosse Uhrzeit setzen: Text, dann das Label so verschieben, dass die
+ * Tinte mittig in der Spalte `x .. x + width` steht. Das Label wird dabei um
+ * den doppelten Versatz schmaler, damit es die Spalte nicht verlaesst --
+ * sonst scrollte der Schirm. Die Spalte merkt sich das Label fuer den
+ * Minutentakt (clock_tick_cb), der nur den Text austauscht.
+ */
+static int32_t s_clock_col_x;
+static int32_t s_clock_col_w;
+static int32_t s_clock_col_y;
+
+static void place_clock_label_locked(const char *text)
+{
+    lv_label_set_text(s_clock_label, text);
+    const lv_font_t *font = lv_obj_get_style_text_font(s_clock_label, LV_PART_MAIN);
+    const int32_t shift = ink_center_shift(font, text);
+    const int32_t inset = shift < 0 ? -shift : shift;
+    lv_obj_set_width(s_clock_label, s_clock_col_w - 2 * inset);
+    lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, s_clock_col_x + shift + inset, s_clock_col_y);
+}
 
 static void render_face_lines_locked(bool visible, const char *event_line)
 {
@@ -1390,16 +1454,16 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     if (with_clock) {
         char clock_text[8];
         format_clock(clock_text, sizeof(clock_text));
-        lv_label_set_text(s_clock_label, clock_text);
         lv_obj_set_style_text_font(s_clock_label,
                                    clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
-        lv_obj_set_width(s_clock_label, clock_only ? CONTENT_W : plan.width);
         char event_line[UI_STATUS_FACE_LEN + 40];
         format_event(event_line, sizeof(event_line));
         const bool face_info = clock_only && (s_face_count > 0 || event_line[0]) &&
                                s_face_label[0] != NULL;
-        lv_obj_align(s_clock_label, LV_ALIGN_TOP_LEFT, clock_only ? 0 : plan.x,
-                     face_info ? FACE_CLOCK_Y : clock_only ? CLOCK_FACE_Y : CLOCK_Y);
+        s_clock_col_x = clock_only ? 0 : plan.x;
+        s_clock_col_w = clock_only ? CONTENT_W : plan.width;
+        s_clock_col_y = clock_only ? CLOCK_FACE_Y : CLOCK_Y;
+        place_clock_label_locked(clock_text);
         render_face_lines_locked(face_info, event_line);
         lv_obj_remove_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -1636,7 +1700,8 @@ static void clock_tick_cb(lv_timer_t *timer)
     char now[8];
     format_clock(now, sizeof(now));
     if (strcmp(now, lv_label_get_text(s_clock_label)) != 0) {
-        lv_label_set_text(s_clock_label, now);
+        /* Neue Ziffern, neue Tintenkanten: Lage mit dem Text nachziehen. */
+        place_clock_label_locked(now);
         /*
          * Einmal je Minute alles nachziehen: der Termin-Countdown laeuft,
          * und um 22 Uhr schlaeft Tecki ein. Seltener als die Ziffern selbst

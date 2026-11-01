@@ -95,18 +95,24 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
 
 /*
  * Zeilen je Seite und Schrift nach der Schriftgroesse aus `watch_settings`
- * (ui_status_font_level): klein 7 Zeilen in 20 px, normal 6 in 23, gross 5
- * in 26. Die Zeilen teilen sich die Hoehe zwischen Ueberschrift und den
- * Seitenpunkten unten; jede ist mindestens 48 px hoch (Tabelle in
- * ui_layout_watch206.h).
+ * (ui_status_font_level): klein 20 px, normal 23, gross 26. Jede Zeile ist
+ * auf **zwei Textzeilen** ausgelegt: Ein langer Titel bricht einmal um und
+ * endet dann mit "..." -- bis 0.3.5 hatte das Label keine feste Hoehe, der
+ * Umbruch lief ueber die Zeile hinaus und wurde oben und unten abgeschnitten
+ * ("Mini-Haus Dachboden: Box und Deco mon"). Die Hoehe einer Zeile ist also
+ * 2 x line_height der Schrift plus ROW_PAD Innenabstand; wie viele davon in
+ * den Platz zwischen Ueberschrift und Seitenpunkten passen, rechnet
+ * rows_per_page() aus den echten Schriftmassen: klein 6, normal 5, gross 5
+ * (Tabelle in ui_layout_watch206.h). Was uebrig bleibt, verteilt sich auf
+ * die Zeilen.
  */
-#define ROWS_MAX 7
-#define TITLE_H 50
-#define ROWS_TOP (HEADER_H + TITLE_H - 20)
+#define ROWS_MAX 6
+#define ROWS_TOP (HEADER_H + 22)
 #define ROWS_BOTTOM (CONTENT_H - 24)
 #define ROW_GAP 6
+#define ROW_PAD 8
+#define ROW_TEXT_LINES 2
 #define STRIPE_W 6
-static const uint8_t LEVEL_ROWS[3] = { 7, 6, 5 };
 static const lv_font_t *const LEVEL_ROW_FONT[3] = {
     &todoteck_watch_font_20, &todoteck_watch_font_23, &todoteck_watch_font_26,
 };
@@ -166,9 +172,20 @@ static struct {
     uint8_t index;
 } s_sel;
 
+static const lv_font_t *row_font(void)
+{
+    return LEVEL_ROW_FONT[ui_status_font_level() % 3];
+}
+
 static uint8_t rows_per_page(void)
 {
-    return LEVEL_ROWS[ui_status_font_level() % 3];
+    const int32_t min_pitch = ROW_TEXT_LINES * lv_font_get_line_height(row_font()) + ROW_PAD +
+                              ROW_GAP;
+    int32_t rows = (ROWS_BOTTOM - ROWS_TOP) / min_pitch;
+    if (rows < 1) {
+        rows = 1;
+    }
+    return (uint8_t)(rows > ROWS_MAX ? ROWS_MAX : rows);
 }
 
 static void create_locked(void)
@@ -188,15 +205,25 @@ static void create_locked(void)
     /*
      * 26 statt 30 px: Seit die Uhrzeit mittig in der Kopfzeile steht, muss
      * "Zuhause" links davor enden (rund 115 statt 135 px breit).
+     *
+     * Ueberschrift und Kartenpunkte stehen auf derselben waagerechten Mitte
+     * wie die kleine Uhrzeit der Kopfzeile: Die liegt auf lv_layer_top() bei
+     * UI_SCREEN_PAD + UI_HEADER_LABEL_Y in der 18er; diese Karte liegt im
+     * Inhalt (also schon um UI_SCREEN_PAD eingerueckt), und die 26er ist um
+     * 9 px hoeher -- der Unterschied der Zeilenhoehen wird halbiert und
+     * abgezogen. Bis 0.3.5 stand "Heute" rund 10 px tiefer als die Uhrzeit.
      */
+    const int32_t header_mid = UI_HEADER_LABEL_Y + lv_font_get_line_height(UI_FONT_SMALL) / 2;
     s_title = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_title, &todoteck_watch_font_26, 0);
     lv_obj_set_style_text_color(s_title, lv_color_hex(0x2ecc71), 0);
-    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, UI_HEADER_INSET_X, HEADER_H - 20);
+    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, UI_HEADER_INSET_X,
+                 header_mid - lv_font_get_line_height(&todoteck_watch_font_26) / 2);
 
-    /* Welche der drei Karten: Punkte oben rechts (statt "1/3"). */
+    /* Welche der drei Karten: Punkte oben rechts (statt "1/3"), auf derselben Mitte. */
     ui_dots_create(&s_card_dots, s_root);
-    lv_obj_align(s_card_dots.box, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X, HEADER_H - 6);
+    lv_obj_align(s_card_dots.box, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X,
+                 header_mid - UI_DOTS_SIZE / 2);
     /* Welche Seite der Karte: Punkte unten mittig, nur bei mehr als einer. */
     ui_dots_create(&s_page_dots, s_root);
     lv_obj_align(s_page_dots.box, LV_ALIGN_TOP_MID, 0, CONTENT_H - 16);
@@ -228,6 +255,10 @@ static void create_locked(void)
         lv_obj_set_style_bg_opa(s_row_stripe[i], LV_OPA_COVER, 0);
         lv_obj_add_flag(s_row_stripe[i], LV_OBJ_FLAG_HIDDEN);
 
+        /*
+         * Feste Breite und Hoehe setzt render_locked(); erst mit beiden
+         * kuerzt LV_LABEL_LONG_DOT -- ohne feste Hoehe bricht es nur um.
+         */
         s_row_text[i] = lv_label_create(s_row[i]);
         lv_label_set_long_mode(s_row_text[i], LV_LABEL_LONG_DOT);
 
@@ -332,7 +363,8 @@ static void render_locked(void)
     const card_list_t *list = &s_lists[s_kind];
     const uint8_t rows = rows_per_page();
     const uint8_t pages = page_count(list);
-    const lv_font_t *row_font = LEVEL_ROW_FONT[ui_status_font_level() % 3];
+    const lv_font_t *font = row_font();
+    const int32_t line_h = lv_font_get_line_height(font);
     if (s_page_index >= pages) {
         s_page_index = pages - 1;
     }
@@ -388,8 +420,20 @@ static void render_locked(void)
             lv_obj_add_flag(s_row_stripe[i], LV_OBJ_FLAG_HIDDEN);
         }
 
-        lv_obj_set_style_text_font(s_row_text[i], row_font, 0);
-        lv_obj_set_width(s_row_text[i], (selected ? CONTENT_W - OK_W - 8 : CONTENT_W - 94) - text_x);
+        /*
+         * Breite des Titels: bis zum OK-Chip, wenn die Zeile markiert ist;
+         * bis zur Zusatzangabe rechts (Uhrzeit, An/Aus), wenn es eine gibt;
+         * sonst die volle Zeile. Hoehe: eine Textzeile, wenn der Titel in
+         * eine passt (dann steht er mittig), sonst zwei -- LONG_DOT kuerzt
+         * nach der zweiten mit "...".
+         */
+        const bool has_aux = s_kind == UI_CARD_SWITCHES || item->aux[0] != '\0';
+        const int32_t text_w = (selected ? CONTENT_W - OK_W - 8 : has_aux ? CONTENT_W - 94 :
+                                CONTENT_W - 16) - text_x;
+        const bool one_line = lv_text_get_width(item->text, (uint32_t)strlen(item->text), font,
+                                                0) <= text_w;
+        lv_obj_set_style_text_font(s_row_text[i], font, 0);
+        lv_obj_set_size(s_row_text[i], text_w, one_line ? line_h : ROW_TEXT_LINES * line_h);
         lv_obj_align(s_row_text[i], LV_ALIGN_LEFT_MID, text_x, 0);
         lv_label_set_text(s_row_text[i], item->text);
         lv_obj_set_style_text_decor(s_row_text[i],
