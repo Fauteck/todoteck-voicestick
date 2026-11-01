@@ -23,6 +23,12 @@ typedef struct {
 typedef struct {
     uint16_t rev;
     uint8_t count;
+    /*
+     * Kam diese Liste je von der Bruecke? Ohne die Unterscheidung zeigte
+     * eine Uhr ohne Daten -- Bruecke nicht verbunden, Glance gescheitert --
+     * "Heute ist alles erledigt.", obwohl Aufgaben offen waren (11/2026).
+     */
+    bool received;
     card_item_t items[UI_CARD_ITEMS_MAX];
 } card_list_t;
 
@@ -78,6 +84,9 @@ static const char *const EMPTY_HINTS[UI_CARD_COUNT] = {
     "Nichts auf der Einkaufsliste.",
     "Noch keine Schalter. In den Einstellungen unter Sprache einrichten.",
 };
+/* Noch nie eine Liste bekommen: ehrlich sagen, dass Daten fehlen. */
+static const char *const NO_DATA_HINT = "Noch keine Daten vom Handy. Ist die Todoteck-App verbunden?";
+
 static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
     UI_STATUS_ICON_HAPPY,
     UI_STATUS_ICON_IDLE,
@@ -265,11 +274,11 @@ static void render_locked(void)
     ui_dots_set(&s_page_dots, pages > 1 ? pages : 0, s_page_index);
 
     if (list->count == 0) {
-        lv_label_set_text(s_empty, EMPTY_HINTS[s_kind]);
+        lv_label_set_text(s_empty, list->received ? EMPTY_HINTS[s_kind] : NO_DATA_HINT);
         lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
         ui_status_icons_set_box(&s_tecki, EMPTY_TECKI_BOX, (CONTENT_W - EMPTY_TECKI_BOX) / 2,
                                 EMPTY_TECKI_Y);
-        ui_status_icons_apply(&s_tecki, EMPTY_POSES[s_kind]);
+        ui_status_icons_apply(&s_tecki, list->received ? EMPTY_POSES[s_kind] : UI_STATUS_ICON_LOOK_LEFT);
         ui_status_icons_show(&s_tecki, true);
     } else {
         lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
@@ -373,6 +382,7 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part)
         memset(&s_lists[kind], 0, sizeof(s_lists[kind]));
     }
     s_lists[kind].rev = rev;
+    s_lists[kind].received = true;
     ui_status_unlock();
 }
 
