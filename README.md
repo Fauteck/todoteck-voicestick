@@ -189,7 +189,7 @@ Watch-only on top of that:
 
 | Feature | How |
 | --- | --- |
-| Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. On the StickS3 it stays off |
+| Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. Since 0.4.1 the sensor runs in wake-on-motion (accelerometer only, 21 Hz low power, gyroscope off) and raises INT1 on GPIO21; only then does the firmware sample for up to 2 s at ~25 Hz and decide — no 100 ms polling task, and the same line wakes the chip from light sleep. On the StickS3 it stays off |
 | Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
 | Gestures | One rule set for every scene — see the gesture table below |
@@ -235,8 +235,10 @@ the watch is thinking or waiting for a confirmation, and nothing opens over
 the transcript.
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
-(its interrupt is on GPIO21), the SD card and the 32 MB flash (the partition
-table stays at 8 MB, identical to the StickS3).
+(its interrupt on GPIO21 wakes from light sleep since 0.4.1, but a cold boot
+cannot tell a raise from a step without 300 ms of sampling, so deep sleep
+keeps the buttons as its only wake source), the SD card and the 32 MB flash
+(the partition table stays at 8 MB, identical to the StickS3).
 
 ## Interaction Model
 

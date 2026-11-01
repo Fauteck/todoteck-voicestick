@@ -71,7 +71,9 @@ static const char *TAG = "voice_stick";
 /*
  * Auf der Waveshare-Uhr ist sie an (10/2026, ausdruecklich gewuenscht): Eine
  * Uhr, die man zum Ablesen erst antippen muss, ist keine. Der Sensor ist dort
- * ein QMI8658; die Komponente waehlt ihn selbst.
+ * ein QMI8658; die Komponente waehlt ihn selbst. Seit Paket H weckt er die
+ * Task per Interrupt (Wake on Motion, GPIO21) statt alle 100 ms abgefragt zu
+ * werden -- siehe wrist_wake.c.
  */
 #define WRIST_WAKE_ENABLED 1
 #else

@@ -120,7 +120,6 @@ static const char *TAG = "ui_status";
  */
 #define LVGL_DRAW_BUF_LINES 10
 #endif /* !UI_WATCH */
-#define LVGL_TICK_PERIOD_MS 10
 #define LVGL_TASK_MAX_DELAY_MS 500
 #define LVGL_TASK_MIN_DELAY_MS (1000 / CONFIG_FREERTOS_HZ)
 #define LVGL_TASK_STACK_SIZE (5 * 1024)
@@ -428,9 +427,14 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t 
 }
 #endif /* !UI_WATCH */
 
-static void lvgl_tick_cb(void *arg)
+/*
+ * LVGLs Uhr liest die Systemzeit, statt dass ein Zeitgeber sie alle 10 ms
+ * weiterschiebt (Paket H, Punkt 2). Der periodische esp_timer weckte den Chip
+ * hundertmal je Sekunde aus dem Light Sleep -- fuer nichts als ein Inkrement.
+ */
+static uint32_t lvgl_tick_get(void)
 {
-    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 static void lvgl_task(void *arg)
@@ -2471,15 +2475,7 @@ esp_err_t ui_status_init(void)
                         TAG, "register lcd callbacks");
 #endif /* UI_WATCH */
 
-    const esp_timer_create_args_t tick_timer_args = {
-        .callback = lvgl_tick_cb,
-        .name = "lvgl_tick",
-        .skip_unhandled_events = true,
-    };
-    esp_timer_handle_t tick_timer = NULL;
-    ESP_RETURN_ON_ERROR(esp_timer_create(&tick_timer_args, &tick_timer), TAG, "create lvgl tick");
-    ESP_RETURN_ON_ERROR(esp_timer_start_periodic(tick_timer, LVGL_TICK_PERIOD_MS * 1000),
-                        TAG, "start lvgl tick");
+    lv_tick_set_cb(lvgl_tick_get);
 
     _lock_acquire(&s_lvgl_lock);
     create_status_ui();
