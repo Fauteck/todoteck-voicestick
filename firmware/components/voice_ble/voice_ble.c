@@ -1024,6 +1024,18 @@ esp_err_t voice_ble_send_glance_request(void)
     return send_state_json("{\"event\":\"glance_request\"}");
 }
 
+esp_err_t voice_ble_send_cancel_transcript(void)
+{
+    ESP_LOGI(TAG, "cancel_transcript");
+    return send_state_json("{\"event\":\"cancel_transcript\"}");
+}
+
+esp_err_t voice_ble_send_undo(void)
+{
+    ESP_LOGI(TAG, "undo");
+    return send_state_json("{\"event\":\"undo\"}");
+}
+
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id)
 {
     char json[96];

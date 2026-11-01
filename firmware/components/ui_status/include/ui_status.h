@@ -53,6 +53,29 @@ void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t 
 /* Welche Flaeche liegt unter dem Finger? -1: keine. `out` bekommt ihren Text. */
 int ui_status_choice_at(int16_t x, int16_t y, char *out, size_t out_size);
 void ui_status_set_cancelled(void);
+/*
+ * Transkript zuerst (nur die Uhr zeichnet "Abbrechen" und den Balken):
+ * "Verstanden" + Text, `cancel_ms` Frist. Endet mit der naechsten Szene.
+ */
+void ui_status_set_transcript(const char *text, uint32_t cancel_ms);
+/* Steht die Transkript-Szene gerade da? */
+bool ui_status_transcript_shown(void);
+/* ... und laeuft ihre Frist noch? */
+bool ui_status_transcript_cancellable(void);
+/* Liegt der Finger auf "Abbrechen" (und laeuft die Frist noch)? */
+bool ui_status_transcript_cancel_at(int16_t x, int16_t y);
+void ui_status_set_transcript_cancelled(void);
+/*
+ * Kurzform <-> ganze Antwort. `true`, wenn umgeschaltet wurde; `false`, wenn
+ * die Szene nichts umzuschalten hat.
+ */
+bool ui_status_toggle_more(void);
+/* Stehen gerade Antwortflaechen einer Rueckfrage da? */
+bool ui_status_choices_open(void);
+/* Schriftgroesse aus `watch_settings` (0 klein, 1 normal, 2 gross); nur die Uhr wertet sie aus. */
+void ui_status_set_font_level(uint8_t level);
+/* Ein Firmware-Update laeuft: Tecki zeigt es auf Ziffernblatt und Bereit-Szene. */
+void ui_status_set_updating(bool updating);
 void ui_status_set_press_too_short(void);
 /* Sprechtaste gedrueckt, aber keine Bruecke verbunden -- vorher geschah dann sichtbar nichts. */
 void ui_status_set_not_connected(void);

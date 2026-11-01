@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.3","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -258,6 +258,68 @@ bridge decides what it does.
 
 `glance_request` asks the bridge to send face and cards now (the watch sends it
 when the cards are opened by swiping up).
+
+### Fork addition: UI/UX package (Waveshare watch)
+
+Five more messages for the watch. All are optional: the StickS3 ignores them,
+and watch firmware older than 0.3.3 ignores unknown events (`ble_control_cb`
+does nothing for an `event` it does not know), so the bridge may always send
+them to a `watch_206`.
+
+Bridge → watch (`control_rx`):
+
+```json
+{"event":"watch_settings","font":"m","home_after_s":30,"tiles":["silent","brightness","cinema","saver","torch","battery"]}
+{"event":"transcript","text":"Leg eine Aufgabe an, Pool rückspülen","cancel_ms":2000}
+{"event":"list","kind":"today","rev":7,"part":0,"items":[["Pool messen","18:00","#2ecc71"],["Müll raus","",""]]}
+```
+
+`watch_settings` carries the watch settings from the app. The bridge sends it
+on every connection and after every glance fetch; it is small and idempotent.
+The watch keeps the values in RAM and in RTC memory, so deep sleep does not
+reset them.
+
+| Field | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `font` | `"s"`, `"m"`, `"l"` | `"m"` | Answer text steps 26–18 / 30–18 / 30–23 px, card rows 20 / 23 / 26 px (7 / 6 / 5 per page), question line 18 / 20 / 23 px, transcript like the answer |
+| `home_after_s` | `0` (never) or 10–600 | `30` | Back to the watch face after this long without input (closes cards, control centre, history). A new answer nobody has touched yet stays at least 120 s. Not during recording, thinking, an open question, the transcript, OTA or the torch |
+| `tiles` | ordered subset of <!-- doku-vertrag:uhr-kacheln -->`silent`, `brightness`, `cinema`, `saver`, `torch`, `battery`<!-- /doku-vertrag --> | all six in this order | Control-centre tiles in order; missing ones are hidden, the grid fills from the top (two columns). Unknown names are dropped, duplicates ignored, an empty list changes nothing |
+
+A missing or invalid field leaves the current value. A new `home_after_s`
+applies from the next input (a settings message alone does not restart the
+countdown); `0` stops it at once.
+
+`transcript` shows "Verstanden" and the recognised text before the bridge acts
+on it, with an "Abbrechen" area at the bottom and a thin bar that runs down
+over `cancel_ms` (default 2000, at most 10000). A tap on the area, a palm on
+the screen, or a short press on the talk button within that window makes the
+watch send `cancel_transcript`, show "Abgebrochen" and vibrate briefly. The
+next `ui_state` (`thinking`, `ready`, …) ends the scene; after the window has
+run out the text stays but the area no longer cancels.
+
+`list` items may carry a third element: the project colour `#RRGGBB` or `""`.
+Only `today` fills it; `shopping` and `switches` send `""` or omit it. The
+watch draws a 6 px rounded stripe on the left of the row; anything that is not
+`#` plus six hex digits means no stripe. Older firmware reads only elements 0
+and 1.
+
+Watch → bridge (state characteristic, like `choice` and `item`):
+
+```json
+{"event":"cancel_transcript"}
+{"event":"undo"}
+```
+
+`undo` reverts the **last** card action (`item`). After every `item` the watch
+shows a "Rückgängig" chip for 5 s (gone earlier on a card switch or when the
+cards close) and sends nothing after that. The chip carries no ID: the bridge
+remembers the last action (kind, ID, target state) for 15 s and rejects older
+ones. The watch restores the row's previous look at once if the list it
+showed has not been replaced since (same `rev`); otherwise the next glance
+redraws it.
+
+`device_info` is unchanged — the bridge recognises the watch by
+`"hardware":"watch_206"` as before.
 
 ### Fork addition: `question` on `ui_state`
 

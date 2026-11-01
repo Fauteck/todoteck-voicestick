@@ -32,6 +32,8 @@ MAIN_C = ROOT / "firmware/main/main.c"
 UI_STATUS_C = ROOT / "firmware/components/ui_status/ui_status.c"
 BOARD_H = ROOT / "firmware/components/stick_s3_board/include/stick_s3_board.h"
 VOICE_BOARD_H = ROOT / "firmware/components/voice_board/include/voice_board.h"
+UI_CONTROL_C = ROOT / "firmware/components/ui_status/ui_control.c"
+UI_CONTROL_H = ROOT / "firmware/components/ui_status/include/ui_control.h"
 VERSION_TXT = ROOT / "firmware/version.txt"
 README = ROOT / "README.md"
 PROTOCOL = ROOT / "docs/protocol.md"
@@ -260,6 +262,38 @@ def check_font_steps() -> None:
             sorted(doc), sorted(code))
 
 
+# --- Kacheln des Kontrollzentrums: docs/protocol.md gegen ui_control.c -----
+
+def check_watch_tiles() -> None:
+    """Welche Namen `watch_settings.tiles` kennt -- und in welcher
+    Reihenfolge sie ohne Einstellung stehen.
+
+    Die Namen stehen in TILE_NAMES (Reihenfolge der Aufzaehlung
+    ui_control_tile_t), die Voreinstellung in s_order. Das Protokoll nennt die
+    Namen in der Reihenfolge der Voreinstellung ("all six in this order") --
+    eine neue Kachel, die nur im Code steht, kennte keine Bruecke.
+    """
+    source = UI_CONTROL_C.read_text(encoding="utf-8")
+    names = re.search(r"TILE_NAMES\[UI_CONTROL_COUNT\]\s*=\s*\{(.*?)\};", source, re.S)
+    order = re.search(r"s_order\[UI_CONTROL_COUNT\]\s*=\s*\{(.*?)\};", source, re.S)
+    enum = re.search(r"typedef enum \{(.*?)\} ui_control_tile_t;",
+                     UI_CONTROL_H.read_text(encoding="utf-8"), re.S)
+    if not names or not order or not enum:
+        fail("uhr-kacheln", PROTOCOL, "TILE_NAMES, s_order oder ui_control_tile_t nicht lesbar")
+        return
+    namen = re.findall(r'"([a-z_]+)"', names.group(1))
+    aufzaehlung = [n for n in re.findall(r"UI_CONTROL_(\w+)", enum.group(1)) if n != "COUNT"]
+    if len(namen) != len(aufzaehlung):
+        fail("uhr-kacheln", PROTOCOL,
+             f"TILE_NAMES ({len(namen)}) und ui_control_tile_t ({len(aufzaehlung)}) "
+             "sind verschieden lang")
+        return
+    name_of = dict(zip(aufzaehlung, namen))
+    code = [name_of.get(k, f"?{k}") for k in re.findall(r"UI_CONTROL_(\w+)", order.group(1))]
+    doc = re.findall(r"`([a-z_]+)`", region(PROTOCOL, "uhr-kacheln"))
+    compare("uhr-kacheln", PROTOCOL, "Kacheln des Kontrollzentrums (Voreinstellung)", doc, code)
+
+
 # --- Abhaengigkeiten: README gegen die idf_component.yml -------------------
 
 def check_dependencies() -> None:
@@ -328,7 +362,7 @@ def check_heimat() -> None:
 
 def main() -> int:
     checks = (check_gatt, check_device_info, check_button_roles, check_button_roles_watch,
-              check_font_steps,
+              check_font_steps, check_watch_tiles,
               check_dependencies, check_heimat)
     for check in checks:
         try:
