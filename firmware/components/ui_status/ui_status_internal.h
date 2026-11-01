@@ -23,9 +23,17 @@ uint8_t ui_status_font_level(void);
  * Ausblenden von Karten, Kontrollzentrum und Taschenlampe. Sperre gehalten.
  */
 void ui_status_header_refresh_locked(void);
+/* Nachtlade-Modus aktiv? Dann vibriert und piept nichts (ui_cards.c fragt vor der Warn-Vibration). */
+bool ui_status_night_mode(void);
 
-/* Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte. */
-#define UI_DOTS_MAX 5
+/*
+ * Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte von
+ * (zehn Verlaufseintraege plus Bilanz-Seite brauchen elf)
+ * je UI_DOTS_SIZE px -- die Groesse steht hier, damit ui_cards.c die Reihe
+ * auf die Mitte der Kopfzeile setzen kann.
+ */
+#define UI_DOTS_MAX 12
+#define UI_DOTS_SIZE 8
 
 typedef struct {
     lv_obj_t *box;

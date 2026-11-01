@@ -6,6 +6,8 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_sh8601.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "voice_board.h"
 
 /*
@@ -153,5 +155,21 @@ void ui_display_watch206_sleep(void)
          */
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (0x10 << 8),
                                                                 NULL, 0));
+    }
+}
+
+void ui_display_watch206_wake(void)
+{
+    if (s_panel) {
+        /*
+         * Sleep-Out (0x11) und danach die 120 ms, die der Controller laut
+         * SH8601-Befehlssatz braucht, bevor er wieder Bilder annimmt; dann
+         * Display an. Der Bildspeicher hat den Schlaf ueberstanden, der alte
+         * Inhalt steht also sofort -- LVGL zeichnet den frischen gleich nach.
+         */
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (0x11 << 8),
+                                                                NULL, 0));
+        vTaskDelay(pdMS_TO_TICKS(120));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_disp_on_off(s_panel, true));
     }
 }

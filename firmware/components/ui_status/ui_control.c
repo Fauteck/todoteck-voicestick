@@ -131,14 +131,21 @@ static void render_locked(const ui_control_state_t *st)
     tile_style(UI_CONTROL_CINEMA, st->cinema, st->cinema ? "An" : "Aus");
     tile_style(UI_CONTROL_SAVER, st->saver, st->saver ? "An" : "Aus");
     tile_style(UI_CONTROL_TORCH, false, "Tippen");
-    char battery[16];
+    /* "24 % · noch 9 h" -- die Restzeit kommt fertig aus main.c; rot erst ab 10 %. */
+    char battery[40];
+    const bool remaining = st->remaining && st->remaining[0];
     if (st->battery_percent < 0) {
         snprintf(battery, sizeof(battery), "--%%");
     } else {
-        snprintf(battery, sizeof(battery), "%d %%%s", st->battery_percent,
-                 st->charging ? " +" : "");
+        snprintf(battery, sizeof(battery), "%d %%%s%s%.14s", st->battery_percent % 1000,
+                 st->charging ? " +" : "", remaining ? " · " : "", remaining ? st->remaining : "");
     }
     tile_style(UI_CONTROL_BATTERY, false, battery);
+    if (st->battery_percent >= 0 && st->battery_percent <= 10 && !st->charging) {
+        lv_obj_set_style_text_color(s_tile_value[UI_CONTROL_BATTERY], lv_color_hex(0xe74c3c), 0);
+    }
+    lv_obj_set_style_text_font(s_tile_value[UI_CONTROL_BATTERY],
+                               remaining ? &todoteck_watch_font_20 : &todoteck_watch_font_26, 0);
 }
 #endif
 

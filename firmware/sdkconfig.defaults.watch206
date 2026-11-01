@@ -11,3 +11,10 @@ CONFIG_VOICE_BOARD_WATCH206=y
 # Zwischenflaechen braucht, soll in den 8 MB PSRAM landen koennen, statt am
 # Topf zu scheitern.
 CONFIG_LV_USE_CLIB_MALLOC=y
+
+# Taktfrequenz (Paket H, Punkt 5): Das hier ist nur das Maximum, das esp_pm
+# mit der Sperre beim Aufnehmen (Opus) und bei OTA anfaehrt. Im Leerlauf
+# laeuft der Chip auf XTAL (40 MHz) oder schlaeft, bei hellem Schirm haelt
+# eine APB-Sperre 80 MHz -- siehe init_power_management in main.c. Der StickS3
+# bleibt bei der Vorgabe von 160.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y

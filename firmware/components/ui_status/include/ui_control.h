@@ -29,6 +29,7 @@ typedef struct {
     bool saver;
     int battery_percent;      /* -1: unbekannt */
     bool charging;
+    const char *remaining;    /* "noch 9 h" oder "" -- die Restzeit aus main.c */
 } ui_control_state_t;
 
 void ui_control_show(const ui_control_state_t *state);

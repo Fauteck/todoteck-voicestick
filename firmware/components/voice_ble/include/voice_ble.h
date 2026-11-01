@@ -42,8 +42,17 @@ bool voice_ble_is_ready(void);
 bool voice_ble_ota_is_active(void);
 esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
                                const uint8_t *opus_payload, size_t len);
+/*
+ * Verbindungsintervall: schnell (15-30 ms) fuers Aufnehmen, OTA und
+ * Listen-/Wetter-Uebertragung, langsam (400-500 ms, Latency 4) im Leerlauf.
+ */
 esp_err_t voice_ble_request_fast_interval(void);
 esp_err_t voice_ble_request_slow_interval(void);
+/*
+ * Unverbunden: die schnellen 30 Sekunden Werbung (60-120 ms) neu starten,
+ * etwa nach einem Tastendruck. Verbunden oder schon schnell: tut nichts.
+ */
+void voice_ble_advertise_fast(void);
 esp_err_t voice_ble_send_device_info(void);
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id);
 esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,
@@ -74,10 +83,25 @@ esp_err_t voice_ble_send_glance_request(void);
 esp_err_t voice_ble_send_action(void);
 /* "Abbrechen" in der Transkript-Szene der Uhr: die Bruecke fuehrt den Satz nicht aus. */
 esp_err_t voice_ble_send_cancel_transcript(void);
-/* "Rueckgaengig" auf einer Karte: die Bruecke macht die letzte Karten-Aktion (`item`) rueckgaengig. */
-esp_err_t voice_ble_send_undo(void);
+/*
+ * "Rueckgaengig" einer Karten-Aktion: Art, Stand und Position wie beim `item`
+ * davor -- die Bruecke haelt die letzten Aktionen 15 Minuten und findet sie
+ * daran wieder. Aeltere Bruecken lesen nur das Ereignis und nehmen die
+ * letzte Aktion zurueck.
+ */
+esp_err_t voice_ble_send_undo(const char *kind, uint16_t rev, uint8_t index);
+/* "Rueckgaengig" eines Turns aus dem Verlauf: `ref` kam mit dem `ui_state` der Antwort. */
+esp_err_t voice_ble_send_undo_turn(uint16_t ref);
+/* "Nochmal" aus dem Verlauf: die Bruecke fuehrt die Frage als Text-Turn erneut aus. */
+esp_err_t voice_ble_send_repeat(const char *text);
 /* Rahmen an `speaker_rx` (Typbyte + Nutzlast), aus dem Bluetooth-Strang gerufen. */
 typedef void (*voice_ble_speaker_cb_t)(const uint8_t *data, size_t len);
 void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb);
 
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);
+/*
+ * Ein fertiges State-Ereignis (JSON, hoechstens 240 Byte) an `state_tx` --
+ * fuer Antworten, die main.c selbst zusammensetzt, etwa die Teile des
+ * Akku-Protokolls (`battery_log`, docs/protocol.md).
+ */
+esp_err_t voice_ble_send_state_json(const char *json);

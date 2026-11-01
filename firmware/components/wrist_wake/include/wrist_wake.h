@@ -7,24 +7,26 @@
 /*
  * Handgelenk anheben statt Knopf druecken.
  *
- * STILLGELEGT (08/2026): Aus dem gedunkelten Schirm weckt nur noch ein
- * Tastendruck. Die Komponente bleibt vollstaendig erhalten, wird aber von
- * main.c nicht mehr aufgesetzt — siehe WRIST_WAKE_ENABLED dort. Alles
- * Folgende beschreibt, was passiert, wenn der Schalter wieder auf 1 steht.
+ * Warum ueberhaupt: Der Schirm dunkelt nach 15 Sekunden ab (und geht nach
+ * weiteren 15 aus). Wer danach die Uhrzeit sehen will, musste sonst eine
+ * Taste druecken — mit der anderen Hand, was am Handgelenk genau die
+ * Bewegung ist, die eine Uhr ueberfluessig machen soll.
  *
- * Warum ueberhaupt: Der Schirm dunkelt nach 15 Sekunden ab. Wer danach die
- * Uhrzeit sehen will, musste bisher eine Taste druecken — mit der
- * anderen Hand, was am Handgelenk genau die Bewegung ist, die eine Uhr
- * ueberfluessig machen soll.
+ * Zwei Geraete, zwei Wege (wrist_wake.c):
  *
- * Was das Geraet dafuer hat: den BMI270, der bis hierher ungenutzt auf dem
- * I2C-Bus lag. Was es *nicht* hat: eine gesicherte Verbindung von dessen
- * Interrupt-Leitung zu einem Pin, der aus dem Tiefschlaf weckt (siehe
- * wrist_wake.c). Deshalb ist das hier eine Abfrage im wachen Zustand und
- * kein Weckgrund: Aus dem Tiefschlaf holt weiterhin nur die Taste.
+ *   StickS3   BMI270, abgefragt alle 100 ms, solange der Schirm dunkel ist.
+ *             STILLGELEGT (08/2026): main.c setzt die Komponente dort nicht
+ *             auf (WRIST_WAKE_ENABLED 0); aus dem gedunkelten Schirm weckt
+ *             nur ein Tastendruck. Die Interrupt-Leitung des BMI270 ist nicht
+ *             gesichert verdrahtet, deshalb Abfrage und kein Weckgrund.
+ *   Uhr       QMI8658 mit "Wake on Motion": Der Sensor weckt die Task ueber
+ *             INT1 (GPIO21), erst dann wird gemessen und entschieden. Keine
+ *             Abfrage im 100-ms-Takt mehr; die Leitung weckt den Chip auch
+ *             aus dem Light Sleep. Aus dem Tiefschlaf holen weiter nur die
+ *             Tasten (Begruendung in wrist_wake.c).
  */
 
-/* Wird aus dem Abfrage-Task gerufen — kurz halten, keine Anzeige darin. */
+/* Wird aus der Sensor-Task gerufen — kurz halten, keine Anzeige darin. */
 typedef void (*wrist_wake_cb_t)(void);
 
 /*
@@ -39,10 +41,10 @@ bool wrist_wake_available(void);
 
 /*
  * Beobachten an oder aus. Eingeschaltet nur, solange der Schirm gedunkelt
- * ist — bei hellem Schirm gibt es nichts aufzuwecken, und der Sensor kostet
- * dann Strom fuer nichts.
+ * oder aus ist — bei hellem Schirm gibt es nichts aufzuwecken, und der Sensor
+ * kostet dann Strom fuer nichts. Auf der Uhr heisst "an": WoM scharf.
  */
 void wrist_wake_watch(bool enabled);
 
-/* Vor dem Tiefschlaf: Messung aus, sonst laeuft der Sensor die Nacht durch. */
+/* Vor dem Tiefschlaf: Sensor aus, sonst laeuft er die Nacht durch. Weckquelle bleiben die Tasten. */
 void wrist_wake_prepare_deep_sleep(void);

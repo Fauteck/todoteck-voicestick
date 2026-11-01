@@ -133,7 +133,7 @@ go stale without someone reading them.
 - The side button aborts a running recording, emits `recording_discarded`, shows `Abgebrochen` and plays the discard tone.
 - The screen shows pairing, ready, listening (`Hört zu`), thinking (`Denkt nach`), pending confirmation, error and battery states from host-sent `ui_state` updates. Text arriving with `ready` is rendered as the answer and kept for recall (up to 192 bytes).
 - Text that does not fit below Tecki takes the whole screen and Tecki is hidden for as long as it is shown; the font is the largest size that fits, and anything beyond even the smallest ends in an ellipsis. Characters outside the fonts' Latin-1 range are replaced with ASCII where an equivalent exists and dropped otherwise.
-- The screen dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. Either button wakes it from deep sleep — a button that does nothing while the device sleeps reads as a broken button.
+- The screen dims after 15 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. Either button wakes it from deep sleep — a button that does nothing while the device sleeps reads as a broken button.
 - BLE OTA updates over the two 3 MB app slots of the OTA partition table, with rollback: a new image boots on probation and confirms itself once Bluetooth is up; if it crashes before that, the bootloader returns to the previous one (needs one USB flash of `merged*.bin` to install a bootloader with rollback enabled).
 
 Tones share the I2S lines with the microphone: `audio_tone_play()` stays silent
@@ -189,13 +189,15 @@ Watch-only on top of that:
 
 | Feature | How |
 | --- | --- |
-| Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. On the StickS3 it stays off |
+| Raising the wrist wakes the dimmed screen | The gesture logic from `wrist_wake` (movement, stillness, tilt ≥ 20°), fed by the QMI8658 (0x6B) instead of the StickS3's BMI270. Since 0.4.1 the sensor runs in wake-on-motion (accelerometer only, 21 Hz low power, gyroscope off) and raises INT1 on GPIO21; only then does the firmware sample for up to 2 s at ~25 Hz and decide — no 100 ms polling task, and the same line wakes the chip from light sleep. On the StickS3 it stays off |
 | Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
 | Gestures | One rule set for every scene — see the gesture table below |
 | Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event with its day always in front, in local time: "in 25 min …" within the hour, otherwise "Heute 09:00 …", "Morgen 09:00 …", "Mo 09:00 …" (a date from a week out); all-day events (starting 00:00) without a time. Long titles end in "...", day and time are never cut; ten minutes before it the watch vibrates three times |
-| Cards: Today, Shopping, Home | They sit in a row to the right of the watch face: swipe left from the face for Today, again for Shopping and Home; swipe right goes back, from Today to the face. Swipe up from the face opens Today too; up pages, down goes back to the face. A tap checks off a shopping item or toggles a Home Assistant switch; on Today a tap only selects the row (highlighted, short buzz) and the green "OK – erledigt" chip at its right end checks it off — another row moves the selection, a tap elsewhere, a swipe, closing, a new list from the bridge or 5 s without OK drop it and send nothing. Either way the bridge carries it out (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
-| Undo | For 5 s after a row is checked off or toggled a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` and restores the row |
+| Cards: Today, Shopping, Home, Weather | They sit in a row to the right of the watch face: swipe left from the face for Today, again for Shopping, Home and Weather; swipe right goes back, from Today to the face. Swipe up from the face opens Today too. Long lists scroll (LVGL scroll, snapped to rows): up moves the list on by one view, down moves it back and, at the top, returns to the face; a thin bar at the bottom shows where you are. Today rows carry the project colour as a stripe, group headings ("Angepinnt", "Überfällig", "Heute", "Außerdem wichtig") sit between the groups, and an overdue date is red. A tap checks off a shopping item or toggles a Home Assistant switch; on Today — and on switches the app marks as "Bestätigen" — a tap only selects the row (highlighted, short buzz) and the green "OK – erledigt" / "OK – schalten" chip at its right end carries it out — another row moves the selection, a tap elsewhere, a swipe, closing, a new list from the bridge or 5 s without OK drop it and send nothing. Either way the bridge carries it out (`list`/`item`, docs/protocol.md). Dots at the top show the card; empty cards show Tecki and a sentence |
+| Weather card | Page 1: now, today, rain ("Regen ab 15 Uhr", blue), six hours (rainy ones blue), sun and wind; "Stand 08:30" when the phone's snapshot is old, the first warning in red under the title (a new one buzzes once). Swipe up for "Nächste Tage" (five days) and, if there is anything, "Pollen & Warnungen". Pure display, no touch areas; "Noch kein Wetter vom Handy." until the bridge's first `weather` |
+| Undo | For 5 s after a row is checked off or toggled a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` with the row's coordinates and restores the row. The action also becomes a history entry ("Erledigt: Müll rausstellen", "Licht Küche: An") whose own "Rückgängig" chip works for 15 min |
+| History with time, marker and chips | Swipe right from the face: first the day's balance ("Heute · 4 Befehle · 3 erledigt · 1 Frage · 0 Fehler", counted on the watch from midnight), then the last ten entries, newest first. Each shows when ("vor 12 min", "11:46", "gestern 18:40"), a coloured marker from the bridge's `outcome` (green angelegt/erledigt, grey Antwort, red Fehler), the question and the answer, and two chips: "Nochmal" repeats the question as a text turn (`repeat`), "Rückgängig" takes the turn back for 15 min (`undo_turn` with the bridge's `ref`). The ten entries live in NVS and survive a restart (written at most every 30 s) |
 | Transcript first | The bridge shows what it understood (`transcript`) for 2 s before acting; "Abbrechen", a palm or a short press on the talk button stops it (`cancel_transcript`) |
 | Short answers | An answer longer than two lines shows its first sentence (at most ~90 characters) and "Tippen für mehr"; a tap shows the whole answer. Open yes/no questions are always shown in full. The history behaves the same and shows its position as dots |
 | Settings from the app | `watch_settings`: font size in three steps (answer, question line, card rows, transcript), how long until the watch returns to the face (an unread answer stays at least 2 min), which control-centre tiles show and in which order |
@@ -203,25 +205,28 @@ Watch-only on top of that:
 | Spoken answers on the watch | The bridge sends the server's TTS as 8 kHz IMA-ADPCM over `speaker_rx`; the watch buffers in PSRAM and plays through the ES8311. Stops when a recording starts |
 | Control centre | Swipe down from the top edge: silent (vibration only), brightness (three steps), cinema (no wrist wake, answers don't light the screen), power saving, torch (the whole screen white until the next touch), battery — order and visibility set in the app |
 | Power saving | Dimmer, dims after 6 s instead of 15, no wrist gesture. Switches itself on once per charge below 15 % |
+| Battery: red from 10 %, time left, night charging | The percentage in the header and the Akku tile turn red only at 10 % and below (grey before). Every ten minutes off the cable the watch samples the level (twelve samples in RTC memory); from three samples over at least 30 min it shows "24 % · noch 9 h" on the tile and, at 20 % and below, a red "noch etwa 2 h" under the face lines. On USB between 22:00 and 06:00 the face shows only the big time in dark grey at brightness 20 — no lines, no Tecki, no vibration, no tones; a touch shows the normal face for 10 s |
 | Palm on the screen | Two or more touch points for a quarter second: a running recording is discarded, overlays close, the screen goes dark |
 | Action button | Hold PWR for 1.5 s: the watch sends `{"event":"action"}`, and the bridge runs the sentence configured for it as a text turn (e.g. "Was steht heute an?") |
 | Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
 | Tecki as status | On the watch face and the ready scene a fixed ranking decides his pose: update running (eyes shut, dots) > no bridge (searching look) > battery ≤ 15 % without charging (tired) > mood > scene |
+| Energy (0.4.1, package H) | Measure first: every 10 min a sample of time, charge and state goes into a 48 h ring in RTC memory, the bridge collects it (`battery_log`, docs/protocol.md) and the server works out the discharge rate per firmware version. Then save: the screen is bright for 15 s, dimmed for 15 s, then off (AMOLED sleep-in, LVGL refresh paused); wrist raise, tap or button bring it back, the palm switches it off at once; night charging keeps the dark time and never switches off. The motion sensor runs in wake-on-motion (accelerometer only, 21 Hz) and raises an interrupt on GPIO21 instead of being polled every 100 ms; the same line and the touch line wake the chip from light sleep. Bluetooth advertises 30 s at 60–120 ms, then at 500–1000 ms (a touch or button restarts the fast 30 s); the connection idles at 400–500 ms with slave latency 4 and 8 s supervision and goes to 15–30 ms while recording, during OTA and for 3 s around every face/list/weather transfer. The CPU idles at 40 MHz (XTAL) with light sleep, holds 80 MHz while the screen is bright and 240 MHz only while recording or updating. Deep sleep after 5 min of inactivity on battery, woken by the buttons only; light sleep stays off on USB (the USB-serial port would drop) |
 
 Gestures on the watch — one rule set for every scene. Horizontally everything
-sits in one row: history | watch face | Today | Shopping | Home, and a swipe to
-the left brings in what lies to the right (the same table heads
+sits in one row: history | watch face | Today | Shopping | Home | Weather, and
+a swipe to the left brings in what lies to the right (the same table heads
 `handle_touch` in `firmware/main/main.c`; touch areas are listed in
 `firmware/components/ui_status/ui_layout_watch206.h`):
 
 | Gesture | Watch face | Answer / history | Cards | Control centre |
 | --- | --- | --- | --- | --- |
 | Swipe down from the top edge | control centre | control centre | control centre | closes |
-| Swipe down | nothing | back to the watch face | back to the watch face | closes |
-| Swipe up | cards | cards | next page | closes |
-| Swipe left | Today | newer; from the newest back to the watch face | next card; nothing after Home | — |
-| Swipe right | into the history | older | previous card; from Today back to the watch face | — |
-| Tap | opens the history | yes/no; short ⇄ full answer; otherwise one older | check off / toggle; on Today first select, then "OK – erledigt"; "Rückgängig" | tile |
+| Swipe right from the left edge | into the history | back to the watch face | back to the watch face | back to the watch face |
+| Swipe down | nothing | back to the watch face | list back by one view; at the top back to the watch face (Weather: previous page) | closes |
+| Swipe up | cards | cards | list on by one view (Weather: next page) | closes |
+| Swipe left | Today | newer; from the newest back to the watch face | next card; nothing after Weather | — |
+| Swipe right | into the history (the balance first) | older | previous card; from Today back to the watch face | — |
+| Tap | opens the history | yes/no; "Nochmal" / "Rückgängig"; short ⇄ full answer; otherwise one older | check off / toggle; on Today and confirmed switches first select, then "OK"; "Rückgängig" | tile |
 | Palm on the screen | everything quiet: recording discarded, layers closed, screen dark | | | |
 
 A dimmed screen is only woken by the first touch; during a recording the
@@ -231,8 +236,10 @@ the watch is thinking or waiting for a confirmation, and nothing opens over
 the transcript.
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
-(its interrupt is on GPIO21), the SD card and the 32 MB flash (the partition
-table stays at 8 MB, identical to the StickS3).
+(its interrupt on GPIO21 wakes from light sleep since 0.4.1, but a cold boot
+cannot tell a raise from a step without 300 ms of sampling, so deep sleep
+keeps the buttons as its only wake source), the SD card and the 32 MB flash
+(the partition table stays at 8 MB, identical to the StickS3).
 
 ## Interaction Model
 
