@@ -44,14 +44,15 @@ typedef struct {
     card_item_t items[UI_CARD_ITEMS_MAX];
 } card_list_t;
 
-static const char *const KIND_NAMES[UI_CARD_COUNT] = { "today", "shopping", "switches" };
+static const char *const KIND_NAMES[UI_CARD_COUNT] = { "today", "shopping", "switches", "weather" };
 
 /*
  * Die Listen liegen im PSRAM-faehigen Heap nicht -- es sind gut 2,6 KB je
  * Liste, statisch im internen RAM. Bei drei Listen vertretbar; mehr
- * Eintraege zeigt eine Uhr ohnehin nicht sinnvoll an.
+ * Eintraege zeigt eine Uhr ohnehin nicht sinnvoll an. Die Wetterkarte
+ * haelt ihren Stand selbst (ui_weather.c).
  */
-static card_list_t s_lists[UI_CARD_COUNT];
+static card_list_t s_lists[UI_CARD_LIST_COUNT];
 
 /*
  * "#RRGGBB" -> Farbe mit CARD_COLOUR_SET; alles andere (leer, "#abc",
@@ -84,6 +85,7 @@ static uint32_t parse_colour(const char *text)
 #if CONFIG_VOICE_BOARD_WATCH206
 #include "ui_layout_watch206.h"
 #include "ui_status_icons.h"
+#include "ui_weather.h"
 
 /*
  * Ueberfaellig: `aux` ist dann das Datum "31.10." statt einer Uhrzeit (so
@@ -104,7 +106,7 @@ static bool is_date_aux(const char *aux)
     return true;
 }
 
-static const char *const TITLES[UI_CARD_COUNT] = { "Heute", "Einkauf", "Zuhause" };
+static const char *const TITLES[UI_CARD_COUNT] = { "Heute", "Einkauf", "Zuhause", "Wetter" };
 /*
  * Leere Karten sagen etwas Freundliches, und Tecki sagt es mit: Heute
  * erledigt -- er freut sich; leere Einkaufsliste -- neutral; keine Schalter
@@ -114,6 +116,7 @@ static const char *const EMPTY_HINTS[UI_CARD_COUNT] = {
     "Heute ist alles erledigt.",
     "Nichts auf der Einkaufsliste.",
     "Noch keine Schalter. In den Einstellungen unter Sprache einrichten.",
+    "Noch kein Wetter vom Handy.",
 };
 /* Noch nie eine Liste bekommen: ehrlich sagen, dass Daten fehlen. */
 static const char *const NO_DATA_HINT = "Noch keine Daten vom Handy. Ist die Todoteck-App verbunden?";
@@ -122,6 +125,7 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
     UI_STATUS_ICON_HAPPY,
     UI_STATUS_ICON_IDLE,
     UI_STATUS_ICON_LOOK_RIGHT,
+    UI_STATUS_ICON_LOOK_LEFT,
 };
 
 /*
@@ -191,6 +195,9 @@ static lv_obj_t *s_title;
 static ui_dots_t s_card_dots;
 static lv_obj_t *s_bar_track;
 static lv_obj_t *s_bar_thumb;
+/* Seiten der Wetterkarte: Punkte unten (wie bis 0.3.6 bei allen Karten) und die gezeigte Seite. */
+static ui_dots_t s_page_dots;
+static uint8_t s_wpage;
 static lv_obj_t *s_empty;
 static ui_status_icons_t s_tecki;
 static lv_obj_t *s_list;
@@ -311,8 +318,12 @@ static void create_locked(void)
     lv_obj_set_style_bg_opa(s_bar_thumb, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_bar_thumb, lv_color_hex(0x2ecc71), 0);
 
+    ui_dots_create(&s_page_dots, s_root);
+    lv_obj_align(s_page_dots.box, LV_ALIGN_TOP_MID, 0, CONTENT_H - 16);
+
     ui_status_icons_create(&s_tecki, s_root);
     ui_status_icons_show(&s_tecki, false);
+    ui_weather_create_locked(s_root);
 
     s_empty = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_empty, UI_FONT_QUESTION, 0);
@@ -479,17 +490,55 @@ static void update_bar_locked(int32_t scroll_y)
     lv_obj_remove_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* Die Wetterkarte: keine Liste, eigene Seiten, Tecki nur ohne Daten. */
+static void render_weather_locked(void)
+{
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+    const uint8_t pages = ui_weather_page_count();
+    if (s_wpage >= pages) {
+        s_wpage = (uint8_t)(pages - 1);
+    }
+    ui_dots_set(&s_page_dots, pages > 1 ? pages : 0, s_wpage);
+    if (!ui_weather_has_data()) {
+        lv_label_set_text(s_empty, ui_weather_received() ? EMPTY_HINTS[UI_CARD_WEATHER]
+                                                         : NO_DATA_HINT);
+        lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
+        ui_status_icons_set_box(&s_tecki, EMPTY_TECKI_BOX, (CONTENT_W - EMPTY_TECKI_BOX) / 2,
+                                EMPTY_TECKI_Y);
+        ui_status_icons_apply(&s_tecki, EMPTY_POSES[UI_CARD_WEATHER]);
+        ui_status_icons_show(&s_tecki, true);
+        ui_weather_render_locked(0, false);
+        return;
+    }
+    lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
+    ui_status_icons_show(&s_tecki, false);
+    ui_weather_render_locked(s_wpage, true);
+    /* Eine Warnung, die so noch nicht zu sehen war: einmal vibrieren. */
+    if (ui_weather_take_new_warning_locked()) {
+        voice_board_haptic_pattern(2, 120, 120);
+    }
+}
+
 static void render_locked(void)
 {
     if (!s_root) {
         return;
     }
+    lv_label_set_text(s_title, TITLES[s_kind]);
+    ui_dots_set(&s_card_dots, UI_CARD_COUNT, (uint8_t)s_kind);
+    if (s_kind == UI_CARD_WEATHER) {
+        render_weather_locked();
+        return;
+    }
+    ui_weather_render_locked(0, false);
+    ui_dots_set(&s_page_dots, 0, 0);
+    lv_obj_remove_flag(s_list, LV_OBJ_FLAG_HIDDEN);
     const card_list_t *list = &s_lists[s_kind];
     const lv_font_t *font = row_font();
     const int32_t line_h = lv_font_get_line_height(font);
     const int32_t h = row_h();
-    lv_label_set_text(s_title, TITLES[s_kind]);
-    ui_dots_set(&s_card_dots, UI_CARD_COUNT, (uint8_t)s_kind);
 
     if (list->count == 0) {
         lv_label_set_text(s_empty, list->received ? EMPTY_HINTS[s_kind] : NO_DATA_HINT);
@@ -767,7 +816,7 @@ const char *ui_cards_kind_name(ui_card_kind_t kind)
 
 void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part)
 {
-    if (kind >= UI_CARD_COUNT) {
+    if (kind >= UI_CARD_LIST_COUNT) {
         return;
     }
     ui_status_lock();
@@ -792,7 +841,7 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part)
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
                        const char *colour, const char *group, const char *flags)
 {
-    if (kind >= UI_CARD_COUNT) {
+    if (kind >= UI_CARD_LIST_COUNT) {
         return;
     }
     ui_status_lock();
@@ -849,6 +898,7 @@ void ui_cards_show(ui_card_kind_t kind)
     hide_undo_locked();
     clear_selection_locked();
     s_kind = kind;
+    s_wpage = 0;
     s_visible = true;
     scroll_top_locked();
     render_locked();
@@ -919,15 +969,53 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
         ui_status_unlock();
         return UI_CARDS_NONE;
     }
-    card_list_t *list = &s_lists[s_kind];
     /* Jede Geste ausser Tippen verwirft die Markierung. */
     if ((voice_board_gesture_t)gesture != VOICE_BOARD_TAP && clear_selection_locked()) {
         render_locked();
     }
+    if (s_kind == UI_CARD_WEATHER) {
+        /*
+         * Die Wetterkarte: nach oben die naechste Seite, nach unten die
+         * vorige -- auf der ersten zurueck aufs Zifferblatt. Links und
+         * rechts wie bei den anderen Karten, Tippen tut nichts.
+         */
+        switch ((voice_board_gesture_t)gesture) {
+        case VOICE_BOARD_SWIPE_LEFT:
+            action = UI_CARDS_END;
+            break;
+        case VOICE_BOARD_SWIPE_RIGHT:
+            s_kind = (ui_card_kind_t)(s_kind - 1);
+            scroll_top_locked();
+            render_locked();
+            break;
+        case VOICE_BOARD_SWIPE_UP:
+            if (s_wpage + 1 < ui_weather_page_count()) {
+                s_wpage++;
+                render_locked();
+            }
+            break;
+        case VOICE_BOARD_SWIPE_DOWN:
+            if (s_wpage == 0) {
+                action = UI_CARDS_CLOSE;
+            } else {
+                s_wpage--;
+                render_locked();
+            }
+            break;
+        default:
+            break;
+        }
+        ui_status_unlock();
+        if (action == UI_CARDS_CLOSE) {
+            ui_cards_hide();
+        }
+        return action;
+    }
+    card_list_t *list = &s_lists[s_kind];
     switch ((voice_board_gesture_t)gesture) {
     /*
      * Die Karten liegen rechts neben dem Zifferblatt in einer Reihe:
-     * Zifferblatt | Heute | Einkauf | Zuhause. Nach links wischen holt die
+     * Zifferblatt | Heute | Einkauf | Zuhause | Wetter. Nach links wischen holt die
      * naechste Karte von rechts; am Ende der Reihe passiert nichts (kein
      * Ringlauf, sonst verliert man die Orientierung). Nach rechts geht es
      * zurueck, von Heute aus aufs Zifferblatt.
@@ -936,6 +1024,7 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
         if (s_kind + 1 < UI_CARD_COUNT) {
             hide_undo_locked();
             s_kind = (ui_card_kind_t)(s_kind + 1);
+            s_wpage = 0;
             scroll_top_locked();
             render_locked();
         } else {
@@ -1084,7 +1173,7 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
 void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
-    if (kind >= UI_CARD_COUNT) {
+    if (kind >= UI_CARD_LIST_COUNT) {
         return;
     }
     ui_status_lock();

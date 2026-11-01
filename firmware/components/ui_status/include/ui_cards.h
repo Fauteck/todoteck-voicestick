@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Die Karten der Uhr: Heute, Einkauf, Zuhause.
+ * Die Karten der Uhr: Heute, Einkauf, Zuhause, Wetter.
  *
  * Erreichbar vom Ziffernblatt mit einem Wischen nach links (oder nach oben);
  * links/rechts wechselt die Karte, nach oben scrollt die Liste weiter, nach
@@ -25,8 +25,13 @@ typedef enum {
     UI_CARD_TODAY,
     UI_CARD_SHOPPING,
     UI_CARD_SWITCHES,
+    /* Die Wetterkarte (ui_weather.c): keine Liste, eigene Seiten, keine Trefferflaechen. */
+    UI_CARD_WEATHER,
     UI_CARD_COUNT,
 } ui_card_kind_t;
+
+/* Die Karten mit `list`-Daten: alle vor der Wetterkarte. */
+#define UI_CARD_LIST_COUNT UI_CARD_WEATHER
 
 #define UI_CARD_ITEMS_MAX 15
 #define UI_CARD_TEXT_LEN 41

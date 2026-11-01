@@ -29,6 +29,7 @@
 #include "ui_control.h"
 #include "ui_history_text.h"
 #include "ui_status.h"
+#include "ui_weather.h"
 #include "voice_ble.h"
 #include "wrist_wake.h"
 
@@ -1203,6 +1204,84 @@ static void apply_list_command(const cJSON *root)
     ui_cards_commit((ui_card_kind_t)kind);
 }
 
+/*
+ * `weather`: die Wetterkarte, in bis zu vier Teilen (docs/protocol.md). `part`
+ * ist eine Abschnittskennung, keine laufende Nummer: 0 leert den Stand und
+ * traegt die Zusammenfassung (leere Felder = kein Wetter), 1 die Stunden,
+ * 2 die Tage, 3 Pollen und Warnungen; leere Teile 1-3 schickt die Bruecke
+ * nicht. Jeder Teil zeichnet nach, falls die Karte gerade zu sehen ist.
+ *   {"event":"weather","rev":3,"part":0,"now":"10° · Bewölkt","today":"14° / 6° · Regen 60 %",
+ *    "rain":"Regen ab 15 Uhr","sun":"07:14 - 16:58","wind":"18 km/h","stale":""}
+ *   {"event":"weather","rev":3,"part":1,"hours":[["12h","11°",""],["15h","11°","r"]]}
+ *   {"event":"weather","rev":3,"part":2,"days":[["Mo","14° / 6°","Regen 60 %"]]}
+ *   {"event":"weather","rev":3,"part":3,"pollen":["Hasel mäßig"],"warnings":["Sturmböen bis 18 Uhr"]}
+ */
+static const char *json_string(const cJSON *item)
+{
+    return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+static void apply_weather_command(const cJSON *root)
+{
+    const cJSON *part = cJSON_GetObjectItemCaseSensitive(root, "part");
+    const int which = cJSON_IsNumber(part) ? (int)part->valuedouble : 0;
+    const cJSON *entry = NULL;
+    switch (which) {
+    case 0: {
+        const cJSON *rev = cJSON_GetObjectItemCaseSensitive(root, "rev");
+        ui_weather_begin(cJSON_IsNumber(rev) ? (uint16_t)rev->valuedouble : 0,
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "now")),
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "today")),
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "rain")),
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "sun")),
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "wind")),
+                         json_string(cJSON_GetObjectItemCaseSensitive(root, "stale")));
+        break;
+    }
+    case 1: {
+        const cJSON *hours = cJSON_GetObjectItemCaseSensitive(root, "hours");
+        if (cJSON_IsArray(hours)) {
+            cJSON_ArrayForEach(entry, hours) {
+                const char *flag = json_string(cJSON_GetArrayItem(entry, 2));
+                ui_weather_add_hour(json_string(cJSON_GetArrayItem(entry, 0)),
+                                    json_string(cJSON_GetArrayItem(entry, 1)),
+                                    strchr(flag, 'r') != NULL);
+            }
+        }
+        break;
+    }
+    case 2: {
+        const cJSON *days = cJSON_GetObjectItemCaseSensitive(root, "days");
+        if (cJSON_IsArray(days)) {
+            cJSON_ArrayForEach(entry, days) {
+                ui_weather_add_day(json_string(cJSON_GetArrayItem(entry, 0)),
+                                   json_string(cJSON_GetArrayItem(entry, 1)),
+                                   json_string(cJSON_GetArrayItem(entry, 2)));
+            }
+        }
+        break;
+    }
+    case 3: {
+        const cJSON *pollen = cJSON_GetObjectItemCaseSensitive(root, "pollen");
+        const cJSON *warnings = cJSON_GetObjectItemCaseSensitive(root, "warnings");
+        if (cJSON_IsArray(pollen)) {
+            cJSON_ArrayForEach(entry, pollen) {
+                ui_weather_add_pollen(json_string(entry));
+            }
+        }
+        if (cJSON_IsArray(warnings)) {
+            cJSON_ArrayForEach(entry, warnings) {
+                ui_weather_add_warning(json_string(entry));
+            }
+        }
+        break;
+    }
+    default:
+        return;
+    }
+    ui_weather_commit();
+}
+
 #if CONFIG_VOICE_BOARD_WATCH206
 /* Einstellungen aus dem RTC-Speicher an die Anzeige -- beim Start und nach jedem `watch_settings`. */
 static void apply_watch_settings_ui(void)
@@ -1377,6 +1456,8 @@ static void ble_control_cb(const char *json)
         apply_face_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
         apply_list_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "weather") == 0) {
+        apply_weather_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "watch_settings") == 0) {
         apply_watch_settings_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "transcript") == 0 &&
@@ -1674,7 +1755,7 @@ static void handle_palm(void)
  * Reihe seit 11/2026). Dieselbe Tabelle steht im README (Abschnitt der Uhr).
  *
  * Waagerecht liegt alles in einer Reihe: Verlauf | Zifferblatt | Heute |
- * Einkauf | Zuhause. Nach links wischen holt, was rechts liegt.
+ * Einkauf | Zuhause | Wetter. Nach links wischen holt, was rechts liegt.
  *
  *   Geste             Zifferblatt      Antwort / Verlauf      Karten              Kontrollzentrum
  *   ----------------  ---------------  ---------------------  ------------------  ---------------
@@ -1880,7 +1961,7 @@ static void handle_touch(const app_event_t *event)
             /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
             voice_board_haptic_pattern(1, 20, 0);
         } else if (action == UI_CARDS_END) {
-            /* Rechts von Zuhause kommt nichts mehr: ein kurzer Stoss sagt das. */
+            /* Rechts von Wetter kommt nichts mehr: ein kurzer Stoss sagt das. */
             voice_board_haptic_pattern(1, 15, 0);
         }
         return;
