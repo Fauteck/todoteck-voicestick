@@ -1645,17 +1645,22 @@ static void handle_palm(void)
 }
 
 /*
- * Die Gestensprache der Uhr -- ein Regelwerk fuer alle Szenen (10/2026).
- * Dieselbe Tabelle steht im README (Abschnitt der Uhr).
+ * Die Gestensprache der Uhr -- ein Regelwerk fuer alle Szenen (10/2026,
+ * Reihe seit 11/2026). Dieselbe Tabelle steht im README (Abschnitt der Uhr).
+ *
+ * Waagerecht liegt alles in einer Reihe: Verlauf | Zifferblatt | Heute |
+ * Einkauf | Zuhause. Nach links wischen holt, was rechts liegt.
  *
  *   Geste             Zifferblatt      Antwort / Verlauf      Karten              Kontrollzentrum
  *   ----------------  ---------------  ---------------------  ------------------  ---------------
  *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     schliesst
  *   nach unten
- *   nach unten        nichts           zurueck: Zifferblatt   zurueck (Karten zu) schliesst
+ *   nach unten        nichts           zurueck: Zifferblatt   Zifferblatt         schliesst
  *   nach oben         Karten           Karten                 naechste Seite      schliesst
- *   links             in den Verlauf   aelter                 naechste Karte      --
- *   rechts            --               neuer                  vorige Karte        --
+ *   links             Heute            neuer; von der         naechste Karte;     --
+ *                                      juengsten: Zifferbl.   am Ende nichts
+ *   rechts            Verlauf          aelter                 vorige Karte; von   --
+ *                                                             Heute: Zifferblatt
  *   Tippen            Verlauf oeffnen  Ja/Nein; Kurzform <->  Zeile abhaken /     Kachel
  *                                      ganz; sonst aelter     schalten; Rueckg.
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
@@ -1670,8 +1675,11 @@ static void handle_palm(void)
  *   - Karten, nach unten: schliesst sofort. Vorher blaetterte es erst eine
  *     Seite zurueck und schloss nur auf der ersten -- dieselbe Geste tat je
  *     nach Seite zweierlei. Die Seiten laufen mit "nach oben" im Kreis.
- *   - Karten zu fuehrt dorthin zurueck, woher man kam (Ziffernblatt oder
- *     Verlauf), nicht mehr immer aufs Ziffernblatt: "eine Ebene zurueck".
+ *   - Karten zu fuehrt aufs Zifferblatt (11/2026: die Karten liegen jetzt
+ *     rechts daneben in der Reihe, nicht mehr eine Ebene darueber -- Wunsch
+ *     des Nutzers). Nach oben oeffnet sie weiterhin, als zweiter Weg.
+ *   - Verlauf: Rechts ist jetzt aelter, links neuer (vorher umgekehrt),
+ *     damit der Verlauf links und die Karten rechts vom Zifferblatt liegen.
  *   - Nach oben oeffnet die Karten nur, wenn gerade nichts laeuft (keine
  *     Aufnahme, kein Denken). Vorher ging das auch mitten im Nachdenken, und
  *     die Antwort kam hinter der Karte an.
@@ -1752,8 +1760,13 @@ static void handle_touch(const app_event_t *event)
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
             }
+        } else if (action == UI_CARDS_CLOSE) {
+            /* Von Heute nach rechts oder nach unten: zurueck aufs Zifferblatt. */
+            ui_status_show_home();
+        } else if (action == UI_CARDS_END) {
+            /* Rechts von Zuhause kommt nichts mehr: ein kurzer Stoss sagt das. */
+            voice_board_haptic_pattern(1, 15, 0);
         }
-        /* UI_CARDS_CLOSE: die Karten sind zu, darunter steht die Ebene von vorher. */
         return;
     }
     switch ((voice_board_gesture_t)event->gesture) {
@@ -1778,13 +1791,27 @@ static void handle_touch(const app_event_t *event)
         apply_app_ui_state("thinking", "", "");
         break;
     }
+    /*
+     * Eine Reihe, raeumlich gedacht: Verlauf | Zifferblatt | Heute | Einkauf
+     * | Zuhause. Nach links wischen holt, was rechts liegt; nach rechts, was
+     * links liegt. Im Verlauf heisst rechts also "aelter", links "neuer",
+     * und links von der juengsten Antwort geht es aufs Zifferblatt zurueck.
+     */
     case VOICE_BOARD_SWIPE_LEFT:
-        ui_status_browse_history();
-        ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
+        if (ui_status_in_history()) {
+            ui_status_browse_newer();
+            ui_status_set_mood(UI_STATUS_MOOD_LOOK_RIGHT, 1200);
+            break;
+        }
+        if (!cards_allowed()) {
+            break;
+        }
+        ui_cards_show(UI_CARD_TODAY);
+        (void)voice_ble_send_glance_request();
         break;
     case VOICE_BOARD_SWIPE_RIGHT:
-        ui_status_browse_newer();
-        ui_status_set_mood(UI_STATUS_MOOD_LOOK_RIGHT, 1200);
+        ui_status_browse_history();
+        ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
         break;
     case VOICE_BOARD_SWIPE_DOWN:
         ui_status_show_home();

@@ -82,9 +82,15 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.3","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.4","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
+
+`device_info` has to fit into a single notification: with the usual MTU of 247
+that is 244 bytes including the 4-byte frame header. Until 0.3.3 it also
+carried `buttons` and `interaction_modes` and came to 252 bytes, so NimBLE
+dropped it silently and the bridge never learned which device was connected.
+Both fields were removed in 0.3.4; no bridge read them.
 
 ```json
 {"event":"button_down","button":"primary","session_id":1234}

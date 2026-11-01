@@ -34,6 +34,7 @@ typedef enum {
     UI_CARDS_ITEM,   /* Zeile angetippt -- `hit` sagt welche */
     UI_CARDS_CLOSE,  /* eine Ebene zurueck (die Karten sind schon zu) */
     UI_CARDS_UNDO,   /* "Rueckgaengig" angetippt -- `hit` sagt, welche Zeile */
+    UI_CARDS_END,    /* am Ende der Reihe weitergewischt -- nichts mehr rechts */
 } ui_cards_action_t;
 
 typedef struct {

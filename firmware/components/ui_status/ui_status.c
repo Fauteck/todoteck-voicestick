@@ -1384,12 +1384,13 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     /*
      * Auf der Uhr steht der Platz im Verlauf als Punktreihe unten statt als
      * "2/5" in der Kopfzeile -- dort steht jetzt die Uhrzeit. Der juengste
-     * Eintrag ist der linke Punkt: Nach links wischen holt, wie beim
-     * Blaettern ueblich, die Seite von rechts herein -- die aeltere.
+     * Eintrag ist der rechte Punkt: Der Verlauf liegt links vom Zifferblatt,
+     * nach rechts wischen holt die aeltere Antwort von links herein (11/2026).
      */
     lv_obj_add_flag(s_position_label, LV_OBJ_FLAG_HIDDEN);
     if (s_render_dots && s_history_count > 0 && s_history_cursor >= 0) {
-        ui_dots_set(&s_history_dots, s_history_count, (uint8_t)s_history_cursor);
+        ui_dots_set(&s_history_dots, s_history_count,
+                    (uint8_t)(s_history_count - 1 - s_history_cursor));
     } else {
         ui_dots_set(&s_history_dots, 0, 0);
     }
@@ -2258,6 +2259,14 @@ static void browse_step(int dir)
 void ui_status_browse_history(void)
 {
     browse_step(1);
+}
+
+bool ui_status_in_history(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    const bool in_history = s_history_cursor >= 0 || s_empty_history_shown;
+    _lock_release(&s_lvgl_lock);
+    return in_history;
 }
 
 void ui_status_browse_newer(void)
