@@ -260,6 +260,12 @@ static int32_t row_h(void)
     return view_h() / rows_per_view() - ROW_GAP;
 }
 
+/* Schalter: ist `aux` der Schaltzustand "1"/"0" (sonst ein Wort, das die Uhr nur zeigt)? */
+static bool aux_is_binary(const char *aux)
+{
+    return strcmp(aux, "1") == 0 || strcmp(aux, "0") == 0;
+}
+
 /* Braucht diese Zeile die Bestaetigung ueber den OK-Chip? */
 static bool needs_confirm(const card_list_t *list, int index)
 {
@@ -622,7 +628,7 @@ static void render_locked(void)
         lv_obj_set_style_text_color(s_row_text[i],
                                     item->done ? lv_color_hex(0x6f7f95) : lv_color_hex(0xf2f2f2),
                                     0);
-        if (s_kind == UI_CARD_SWITCHES) {
+        if (s_kind == UI_CARD_SWITCHES && aux_is_binary(item->aux)) {
             /* Schalter: An/Aus als farbiges Wort; angetippt zeigt es den Zielzustand. */
             bool on = strcmp(item->aux, "1") == 0;
             if (item->done) {
@@ -631,6 +637,17 @@ static void render_locked(void)
             lv_label_set_text(s_row_aux[i], on ? "An" : "Aus");
             lv_obj_set_style_text_color(s_row_aux[i],
                                         on ? lv_color_hex(0x2ecc71) : lv_color_hex(0x9aa3ad), 0);
+        } else if (s_kind == UI_CARD_SWITCHES) {
+            /*
+             * Ein Wort statt An/Aus (0.4.3): die Option eines input_select
+             * oder "Offen"/"Zu" eines Schlosses. Den Zielstand kennt die Uhr
+             * nicht -- angetippt steht "..." bis die Bruecke die Karte neu
+             * schickt (sie tut das nach jeder Aktion).
+             */
+            lv_label_set_text(s_row_aux[i], item->done ? "..." : item->aux);
+            lv_obj_set_style_text_color(s_row_aux[i],
+                                        item->done ? lv_color_hex(0x9aa3ad) : lv_color_hex(0x2ecc71),
+                                        0);
         } else {
             /* Ueberfaellig (Datum statt Uhrzeit): rot. */
             lv_label_set_text(s_row_aux[i], item->aux);
@@ -787,6 +804,7 @@ static ui_cards_action_t check_off_locked(card_list_t *list, int index, ui_cards
         hit->index = (uint8_t)index;
         strlcpy(hit->text, item->text, sizeof(hit->text));
         /* Schalter: `aux` ist der Stand vor dem Tippen, `done` kehrt ihn um. */
+        hit->binary = aux_is_binary(item->aux);
         hit->on = (strcmp(item->aux, "1") == 0) != item->done;
     }
     hide_undo_locked();

@@ -2398,7 +2398,9 @@ static void handle_touch(const app_event_t *event)
                  */
                 char line[UI_CARD_TEXT_LEN + 16];
                 if (hit.kind == UI_CARD_SWITCHES) {
-                    snprintf(line, sizeof(line), "%s: %s", hit.text, hit.on ? "An" : "Aus");
+                    /* Ohne An/Aus (Option, Schloss) kennt die Uhr den Zielstand nicht. */
+                    snprintf(line, sizeof(line), "%s: %s", hit.text,
+                             !hit.binary ? "weiter" : hit.on ? "An" : "Aus");
                 } else {
                     snprintf(line, sizeof(line), "Erledigt: %s", hit.text);
                 }

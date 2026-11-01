@@ -35,7 +35,8 @@ typedef enum {
 
 #define UI_CARD_ITEMS_MAX 15
 #define UI_CARD_TEXT_LEN 41
-#define UI_CARD_AUX_LEN 8
+/* Rechts in der Zeile: Uhrzeit, Datum, "1"/"0" -- oder seit 0.4.3 ein Wort (Option, "Offen"), 15 Bytes. */
+#define UI_CARD_AUX_LEN 16
 
 typedef enum {
     UI_CARDS_NONE,   /* nichts zu tun (oder intern erledigt) */
@@ -50,9 +51,14 @@ typedef struct {
     ui_card_kind_t kind;
     uint16_t rev;
     uint8_t index;
-    /* Fuer den Verlaufseintrag: der Zeilentext und bei Schaltern der Zielzustand. */
+    /*
+     * Fuer den Verlaufseintrag: der Zeilentext und bei Schaltern der
+     * Zielzustand -- `binary` sagt, ob `aux` "1"/"0" war (dann gilt `on`);
+     * sonst zeigt die Zeile ein Wort, und die Uhr kennt den Zielstand nicht.
+     */
     char text[UI_CARD_TEXT_LEN];
     bool on;
+    bool binary;
 } ui_cards_hit_t;
 
 /* "today", "shopping", "switches" -> Art; -1 bei Unbekanntem. */

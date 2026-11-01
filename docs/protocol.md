@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.2","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.3","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -251,7 +251,10 @@ vibrates ten minutes before it starts.
 
 `list` arrives in parts because one write carries about 240 bytes: part `0`
 clears the card, every part appends `[text, aux]` pairs (aux is a time for
-`today`, `"1"`/`"0"` for `switches`). At most 15 entries per card. The watch
+`today`, `"1"`/`"0"` for `switches` — or, since 0.4.3, a word of up to 15
+bytes such as the current option of an `input_select` or "Offen"/"Zu" of a
+lock, which the watch shows as it is and replaces with "..." after a tap until
+the next list arrives). At most 15 entries per card. The watch
 never sees IDs; a tap on a row answers with kind, `rev` and position, and the
 bridge maps it back to the item it sent — a `rev` that no longer matches is
 ignored.
@@ -376,7 +379,7 @@ midnight local time.
 
 ```json
 {"event":"list","kind":"today","rev":7,"part":0,"items":[["Pool messen","18:00","#2ecc71","Heute",""],["Müll raus","31.10.","","Überfällig",""]]}
-{"event":"list","kind":"switches","rev":2,"part":0,"items":[["Licht Küche","1","","","c"]]}
+{"event":"list","kind":"switches","rev":2,"part":0,"items":[["Licht Küche","1","","","c"],["Brunnen","Pool füllen","","",""],["Garten Tür","Zu","","","c"]]}
 ```
 
 Element 4 is the group heading (`today` only: "Angepinnt", "Überfällig",
