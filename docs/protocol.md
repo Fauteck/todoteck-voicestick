@@ -411,6 +411,51 @@ before makes it vibrate once. Until the first `weather` arrives the card says
 
 `face` lines may now be up to 56 bytes (was 40); `event_title` stays at 40.
 
+### Fork addition: battery log (0.4.1)
+
+Package H for the watch (11/2026): measure first, then save. Every ten
+minutes the watch takes a sample of time, charge and state and keeps 288 of
+them (48 h) in RTC memory, where they survive deep sleep but not a power
+loss; the last six also go to NVS once an hour and come back after a cold
+start. The bridge collects them and uploads them to the server, which works
+out the discharge rate per firmware version — so every change shows what it
+is worth.
+
+**`battery_log_request`** — bridge → watch on `control_rx`, after
+`device_info` and then hourly:
+
+```json
+{"event":"battery_log_request","since":1762000000}
+```
+
+`since` is the last sample time the bridge already holds (Unix seconds,
+0 for everything). The watch answers on `state_tx` with one or more
+**`battery_log`** events, each at most 240 bytes, written 30 ms apart so the
+bridge keeps up:
+
+```json
+{"event":"battery_log","part":0,"total":3,"samples":[[1762000000,87,13],[1762000600,86,8]]}
+```
+
+`part` counts from 0, `total` is the number of parts, and only samples with
+`t > since` are sent, oldest first. Nothing new gives one part with an empty
+list: `{"event":"battery_log","part":0,"total":1,"samples":[]}`. A sample is
+`[t, p, f]`: `t` Unix seconds (local time is the server's business), `p` per
+cent, `f` a bit mask of the state at that moment:
+
+| Bit | Meaning |
+| --- | --- |
+| 1 | charging |
+| 2 | USB power present |
+| 4 | display lit (bright or dimmed, not off) |
+| 8 | Bluetooth connected |
+| 16 | light sleep enabled |
+| 32 | a recording happened since the previous sample |
+
+Samples are only taken once the clock has been set (RTC chip or `time`);
+the firmware version is not part of a sample — the bridge takes it from
+`device_info` and attaches it to the upload. The StickS3 ignores the request.
+
 ### Fork addition: `question` on `ui_state`
 
 The Todoteck bridge adds one optional field to the `ready` state:

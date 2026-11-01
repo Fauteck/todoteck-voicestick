@@ -90,3 +90,9 @@ typedef void (*voice_ble_speaker_cb_t)(const uint8_t *data, size_t len);
 void voice_ble_set_speaker_callback(voice_ble_speaker_cb_t cb);
 
 esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);
+/*
+ * Ein fertiges State-Ereignis (JSON, hoechstens 240 Byte) an `state_tx` --
+ * fuer Antworten, die main.c selbst zusammensetzt, etwa die Teile des
+ * Akku-Protokolls (`battery_log`, docs/protocol.md).
+ */
+esp_err_t voice_ble_send_state_json(const char *json);

@@ -10,6 +10,7 @@
 
 #include "button_gpio.h"
 #include "cJSON.h"
+#include "nvs.h"
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -24,6 +25,7 @@
 #include "audio_pipeline.h"
 #include "audio_tone.h"
 #include "battery_estimate.h"
+#include "battery_log.h"
 #include "voice_board.h"
 #include "esp_ota_ops.h"
 #include "ui_cards.h"
@@ -114,6 +116,8 @@ static bool s_recording_pm_locked;
 static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
+/* Was apply_light_sleep() zuletzt eingestellt hat (Flag 16 im Akku-Protokoll). */
+static bool s_light_sleep_on;
 /*
  * Der naechste Termin, wie ihn die Bruecke mit dem Ziffernblatt schickt
  * (UTC-Sekunden, 0 = keiner) -- und ob fuer ihn schon vibriert wurde. Zehn
@@ -180,6 +184,26 @@ static int64_t s_answer_at_us;
 static RTC_DATA_ATTR battery_ring_t s_battery_ring;
 static char s_battery_remaining[24];
 #define BATTERY_FACE_HINT_PERCENT 20
+/*
+ * Akku-Protokoll (Paket H, 1): alle zehn Minuten Zeit, Prozent und Zustand
+ * in einen Ring von 288 Proben im RTC-Speicher (48 h, ueberlebt den
+ * Tiefschlaf). Stuendlich gehen die letzten sechs in den NVS und kommen nach
+ * einem Kaltstart zurueck. Die Bruecke holt den Ring mit
+ * `battery_log_request` ab (docs/protocol.md) und laedt ihn zum Server, der
+ * daraus die Entladerate je Firmware-Fassung rechnet -- zuerst messen, dann
+ * sparen. Die Logik steht in battery_log.h.
+ */
+static RTC_DATA_ATTR battery_log_t s_battery_log;
+static RTC_DATA_ATTR uint32_t s_battery_log_saved_t;
+/* Seit der letzten Probe wurde aufgenommen (Flag 32). */
+static bool s_recorded_since_sample;
+#define BATTERY_LOG_NVS_NAMESPACE "akku"
+#define BATTERY_LOG_NVS_KEY "battery_log"
+#define BATTERY_LOG_NVS_INTERVAL_S (60 * 60)
+/* Schreibtakt zwischen den Teilen der Antwort, damit die Bruecke nachkommt. */
+#define BATTERY_LOG_PART_GAP_MS 30
+/* Vor diesem Zeitpunkt ist die Uhr nicht gestellt; eine Probe ohne Zeit nuetzt niemandem. */
+#define BATTERY_LOG_MIN_EPOCH 1700000000u
 /*
  * Nachtlade-Modus (Paket G, 17): am USB-Kabel zwischen 22 und 6 Uhr Ortszeit
  * zeigt das Zifferblatt nur die dunkelgraue Uhrzeit bei Helligkeit 20,
@@ -313,13 +337,16 @@ typedef enum {
     APP_EVENT_HOME_TIMEOUT,
     /* Die zehn Sekunden normales Zifferblatt im Nachtlade-Modus sind vorbei. */
     APP_EVENT_NIGHT_PEEK_END,
+    /* Die Bruecke will das Akku-Protokoll ab `epoch` (Uhr). */
+    APP_EVENT_BATTERY_LOG_REQUEST,
 } app_event_type_t;
 
 typedef struct {
     app_event_type_t type;
     uint32_t written;
     uint32_t size;
-    /* Nur fuer APP_EVENT_TIME: UTC-Sekunden und Abstand der Ortszeit. */
+    /* Nur fuer APP_EVENT_TIME: UTC-Sekunden und Abstand der Ortszeit.
+       Bei APP_EVENT_BATTERY_LOG_REQUEST das `since` der Bruecke. */
     int64_t epoch;
     int32_t tz_offset_min;
     char state[32];
@@ -441,6 +468,8 @@ static void apply_light_sleep(void)
     esp_err_t err = esp_pm_configure(&pm_config);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_pm_configure: %s", esp_err_to_name(err));
+    } else {
+        s_light_sleep_on = light_sleep;
     }
     ESP_LOGI(TAG, "light sleep %s", light_sleep ? "an" : "aus (USB)");
 }
@@ -896,6 +925,9 @@ static uint32_t start_recording(void)
     }
 
     s_recording = true;
+#if CONFIG_VOICE_BOARD_WATCH206
+    s_recorded_since_sample = true;
+#endif
     s_app_ui_state = APP_UI_STATE_RECORDING;
     s_recording_started_us = esp_timer_get_time();
     s_release_ticks = 0;
@@ -1504,6 +1536,21 @@ static void ble_control_cb(const char *json)
         apply_weather_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "watch_settings") == 0) {
         apply_watch_settings_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "battery_log_request") == 0) {
+        /*
+         * Nicht von hier aus antworten: Die Teile gehen mit 30 ms Abstand
+         * raus, und der Bluetooth-Strang soll dafuer nicht eine Sekunde
+         * stehen. Ueber die Warteschlange wie alles andere.
+         */
+        const cJSON *since = cJSON_GetObjectItemCaseSensitive(root, "since");
+        app_event_t ev = {
+            .type = APP_EVENT_BATTERY_LOG_REQUEST,
+            .epoch = cJSON_IsNumber(since) && since->valuedouble > 0 ? (int64_t)since->valuedouble
+                                                                       : 0,
+        };
+        if (s_app_event_queue && xQueueSend(s_app_event_queue, &ev, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "battery_log_request: Warteschlange voll");
+        }
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "transcript") == 0 &&
                cJSON_IsString(text)) {
         const cJSON *cancel = cJSON_GetObjectItemCaseSensitive(root, "cancel_ms");
@@ -1754,6 +1801,123 @@ static void start_night_peek(void)
  * Stichprobe alle zehn Minuten ohne Kabel; am Kabel leert sich der Ring.
  * Die Kachel bekommt "noch 9 h", das Zifferblatt ab 20 % "noch etwa 2 h".
  */
+/*
+ * Akku-Protokoll: die letzten sechs Proben in den NVS -- stuendlich, und nur
+ * wenn seit dem letzten Schreiben etwas Neues da ist. Der Blob ist klein
+ * (36 Byte), der Takt niedrig; die Flash-Zellen halten das Jahre.
+ */
+static void battery_log_save(void)
+{
+    battery_log_sample_t tail[BATTERY_LOG_NVS_SAMPLES];
+    const size_t n = battery_log_export_tail(&s_battery_log, tail, BATTERY_LOG_NVS_SAMPLES);
+    if (n == 0) {
+        return;
+    }
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(BATTERY_LOG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Akku-Protokoll: NVS %s", esp_err_to_name(err));
+        return;
+    }
+    err = nvs_set_blob(nvs, BATTERY_LOG_NVS_KEY, tail, n * sizeof(tail[0]));
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Akku-Protokoll: NVS schreiben %s", esp_err_to_name(err));
+        return;
+    }
+    s_battery_log_saved_t = tail[n - 1].t;
+}
+
+/* Beim Kaltstart: was der NVS hat, in den leeren Ring. Nach dem Tiefschlaf ist der Ring voller. */
+static void battery_log_load(void)
+{
+    if (s_battery_log.count != 0) {
+        return;
+    }
+    nvs_handle_t nvs;
+    if (nvs_open(BATTERY_LOG_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    battery_log_sample_t tail[BATTERY_LOG_NVS_SAMPLES];
+    size_t size = sizeof(tail);
+    esp_err_t err = nvs_get_blob(nvs, BATTERY_LOG_NVS_KEY, tail, &size);
+    nvs_close(nvs);
+    if (err != ESP_OK || size % sizeof(tail[0]) != 0) {
+        return;
+    }
+    battery_log_import(&s_battery_log, tail, size / sizeof(tail[0]));
+    const battery_log_sample_t *newest = battery_log_newest(&s_battery_log);
+    s_battery_log_saved_t = newest ? newest->t : 0;
+    ESP_LOGI(TAG, "Akku-Protokoll: %u Proben aus dem NVS", (unsigned)s_battery_log.count);
+}
+
+/*
+ * Eine Stichprobe, wenn sie faellig ist (alle zehn Minuten) und die Uhr
+ * gestellt ist -- gerufen im Akku-Takt aus update_battery_status().
+ */
+static void battery_log_sample(int level, bool charging, bool usb)
+{
+    const int64_t now64 = (int64_t)time(NULL);
+    if (now64 < (int64_t)BATTERY_LOG_MIN_EPOCH || now64 > (int64_t)UINT32_MAX) {
+        return;
+    }
+    const uint32_t now = (uint32_t)now64;
+    if (!battery_log_due(&s_battery_log, now)) {
+        return;
+    }
+    uint8_t flags = 0;
+    if (charging) {
+        flags |= BATTERY_LOG_FLAG_CHARGING;
+    }
+    if (usb) {
+        flags |= BATTERY_LOG_FLAG_USB;
+    }
+    if (!s_display_dimmed) {
+        flags |= BATTERY_LOG_FLAG_DISPLAY_ON;
+    }
+    if (voice_ble_is_connected()) {
+        flags |= BATTERY_LOG_FLAG_BLE;
+    }
+    if (s_light_sleep_on) {
+        flags |= BATTERY_LOG_FLAG_LIGHT_SLEEP;
+    }
+    if (s_recorded_since_sample) {
+        flags |= BATTERY_LOG_FLAG_RECORDED;
+    }
+    s_recorded_since_sample = false;
+    battery_log_add(&s_battery_log, now, level, flags);
+    if (now - s_battery_log_saved_t >= BATTERY_LOG_NVS_INTERVAL_S || now < s_battery_log_saved_t) {
+        battery_log_save();
+    }
+}
+
+/*
+ * Antwort auf `battery_log_request`: alle Proben mit t > since, in Teilen von
+ * je hoechstens 240 Byte, 30 ms Abstand. Laeuft im Ereignis-Strang -- bei 48
+ * Stunden sind das 36 Teile und gut eine Sekunde, in der die Anzeige steht;
+ * der Normalfall nach dem Verbinden ist ein Teil.
+ */
+static void send_battery_log(int64_t since)
+{
+    const uint32_t since32 = since > 0 && since < (int64_t)UINT32_MAX ? (uint32_t)since : 0;
+    const unsigned total = battery_log_part_count(battery_log_count_since(&s_battery_log, since32));
+    char json[BATTERY_LOG_PART_MAX_BYTES + 1];
+    for (unsigned part = 0; part < total; part++) {
+        (void)battery_log_part_json(&s_battery_log, since32, part, json, sizeof(json));
+        if (voice_ble_send_state_json(json) != ESP_OK) {
+            ESP_LOGW(TAG, "Akku-Protokoll: Teil %u/%u nicht gesendet", part, total);
+            return;
+        }
+        if (part + 1 < total) {
+            vTaskDelay(pdMS_TO_TICKS(BATTERY_LOG_PART_GAP_MS));
+        }
+    }
+    ESP_LOGI(TAG, "Akku-Protokoll: %u Teil(e) ab %lu gesendet", total, (unsigned long)since32);
+}
+
 static void update_battery_estimate(int level, bool external)
 {
     const int64_t now = (int64_t)time(NULL);
@@ -2381,6 +2545,11 @@ static void app_event_task(void *arg)
             update_night_mode();
 #endif
             break;
+        case APP_EVENT_BATTERY_LOG_REQUEST:
+#if CONFIG_VOICE_BOARD_WATCH206
+            send_battery_log(event.epoch);
+#endif
+            break;
         case APP_EVENT_ACTION:
             /*
              * Die Aktionstaste: was sie tut, legt die Bruecke fest (ein Satz,
@@ -2871,6 +3040,7 @@ static void update_battery_status(void)
         ui_status_set_battery(level, charging, usb_powered);
 #if CONFIG_VOICE_BOARD_WATCH206
         update_battery_estimate(level, charging || usb_powered);
+        battery_log_sample(level, charging, usb_powered);
         update_night_mode();
         if (charging || usb_powered) {
             s_saver_auto_done = false;
@@ -2911,6 +3081,8 @@ void app_main(void)
     ESP_ERROR_CHECK(init_home_timer());
     /* Aus dem Tiefschlaf zurueck: die Einstellungen aus der App stehen im RTC-Speicher. */
     apply_watch_settings_ui();
+    /* ui_status_init() hat den NVS schon aufgesetzt (Verlauf). */
+    battery_log_load();
 #endif
     ESP_ERROR_CHECK(audio_tone_init());
 #if WRIST_WAKE_ENABLED

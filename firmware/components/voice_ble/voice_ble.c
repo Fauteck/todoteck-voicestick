@@ -969,6 +969,11 @@ static esp_err_t send_state_json(const char *json)
     return ESP_OK;
 }
 
+esp_err_t voice_ble_send_state_json(const char *json)
+{
+    return send_state_json(json);
+}
+
 esp_err_t voice_ble_send_device_info(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
