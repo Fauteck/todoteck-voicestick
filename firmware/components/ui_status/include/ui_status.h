@@ -54,6 +54,12 @@ typedef enum {
 esp_err_t ui_status_init(void);
 esp_err_t ui_status_set_brightness(uint8_t brightness);
 void ui_status_prepare_deep_sleep(void);
+/*
+ * Schirm ganz aus (Sleep-In des Controllers, LVGL-Refresh pausiert) und
+ * wieder an. Nur die Uhr; der StickS3 kennt nur die Helligkeit. Das
+ * Einschalten dauert 120 ms (Sleep-Out-Wartezeit).
+ */
+void ui_status_set_display_off(bool off);
 void ui_status_set_device_name(const char *device_name);
 void ui_status_set_advertising(void);
 void ui_status_set_pairing(const char *device_name);

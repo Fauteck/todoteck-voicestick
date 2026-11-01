@@ -47,6 +47,16 @@ static const char *TAG = "voice_stick";
  * BLE-Verbindung, das Aufhellen dagegen nur einen Tastendruck.
  */
 #define DISPLAY_DIM_TIMEOUT_MS (15 * 1000)
+/*
+ * Aus statt nur gedimmt (Paket H, Punkt 3, nur die Uhr): 15 Sekunden nach
+ * dem Abdunkeln geht das AMOLED ganz aus (Sleep-In des Controllers). Ein
+ * gedimmtes AMOLED leuchtet weiter pixelweise; aus kostet es fast nichts.
+ * Handgelenk heben, Tippen oder Taste holen es zurueck -- der Touch bleibt
+ * wach, nur der Controller schlaeft. Im Nachtlade-Modus bleibt die dunkle
+ * Uhrzeit stehen, dort gibt es kein Aus.
+ */
+#define DISPLAY_OFF_TIMEOUT_MS (15 * 1000)
+#define DISPLAY_OFF_TIMEOUT_US (DISPLAY_OFF_TIMEOUT_MS * 1000ULL)
 #define DISPLAY_ACTIVE_BRIGHTNESS 128
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
@@ -114,6 +124,11 @@ static RTC_DATA_ATTR int32_t s_clock_offset_min;
 static RTC_DATA_ATTR bool s_clock_valid;
 static bool s_ota_updating;
 static bool s_display_dimmed;
+#if CONFIG_VOICE_BOARD_WATCH206
+/* Nur die Uhr: der Controller schlaeft (impliziert s_display_dimmed). */
+static bool s_display_off;
+#endif
+static esp_timer_handle_t s_display_off_timer;
 static bool s_recording_pm_locked;
 static bool s_ota_pm_locked;
 static bool s_battery_charging;
@@ -341,6 +356,8 @@ typedef enum {
     APP_EVENT_NIGHT_PEEK_END,
     /* Die Bruecke will das Akku-Protokoll ab `epoch` (Uhr). */
     APP_EVENT_BATTERY_LOG_REQUEST,
+    /* 15 Sekunden gedimmt vorbei: Schirm aus (Uhr). */
+    APP_EVENT_DISPLAY_OFF,
 } app_event_type_t;
 
 typedef struct {
@@ -551,6 +568,9 @@ static void restart_display_dim_timer(void)
     }
 
     (void)esp_timer_stop(s_display_dim_timer);
+    if (s_display_off_timer) {
+        (void)esp_timer_stop(s_display_off_timer);
+    }
     if (!s_recording && !s_ota_updating) {
         /* Beim Sparen nach sechs statt fuenfzehn Sekunden. */
         esp_err_t err = esp_timer_start_once(s_display_dim_timer,
@@ -617,9 +637,25 @@ static void restart_home_timer(void)
 }
 #endif
 
+/* Schirm aus oder an -- nur die Uhr, der StickS3 kennt nur das Dimmen. */
+static void set_display_off(bool off)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (s_display_off == off) {
+        return;
+    }
+    s_display_off = off;
+    ui_status_set_display_off(off);
+    ESP_LOGI(TAG, "Schirm %s", off ? "aus" : "an");
+#else
+    (void)off;
+#endif
+}
+
 static void note_activity(void)
 {
     if (s_display_dimmed) {
+        set_display_off(false);
         esp_err_t err = ui_status_set_brightness(active_brightness());
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "restore brightness failed: %s", esp_err_to_name(err));
@@ -1753,6 +1789,10 @@ static void set_night_mode(bool on)
         if (s_display_dim_timer) {
             (void)esp_timer_stop(s_display_dim_timer);
         }
+        if (s_display_off_timer) {
+            (void)esp_timer_stop(s_display_off_timer);
+        }
+        set_display_off(false);
         s_display_dimmed = false;
         ui_status_set_idle_dimmed(false);
         (void)ui_status_set_brightness(NIGHT_BRIGHTNESS);
@@ -1877,7 +1917,7 @@ static void battery_log_sample(int level, bool charging, bool usb)
     if (usb) {
         flags |= BATTERY_LOG_FLAG_USB;
     }
-    if (!s_display_dimmed) {
+    if (!s_display_off) {
         flags |= BATTERY_LOG_FLAG_DISPLAY_ON;
     }
     if (voice_ble_is_connected()) {
@@ -2054,6 +2094,10 @@ static void handle_palm(void)
     if (s_display_dim_timer) {
         (void)esp_timer_stop(s_display_dim_timer);
     }
+    if (s_display_off_timer) {
+        (void)esp_timer_stop(s_display_off_timer);
+    }
+    set_display_off(true);
 }
 
 /*
@@ -2552,6 +2596,13 @@ static void app_event_task(void *arg)
             send_battery_log(event.epoch);
 #endif
             break;
+        case APP_EVENT_DISPLAY_OFF:
+#if CONFIG_VOICE_BOARD_WATCH206
+            if (s_display_dimmed && !s_recording && !s_ota_updating && !s_night_mode) {
+                set_display_off(true);
+            }
+#endif
+            break;
         case APP_EVENT_ACTION:
             /*
              * Die Aktionstaste: was sie tut, legt die Bruecke fest (ein Satz,
@@ -2850,6 +2901,12 @@ static void display_dim_timer_cb(void *arg)
             /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
             wrist_wake_watch(wrist_wake_allowed());
 #endif
+#if CONFIG_VOICE_BOARD_WATCH206
+            if (s_display_off_timer) {
+                (void)esp_timer_stop(s_display_off_timer);
+                (void)esp_timer_start_once(s_display_off_timer, DISPLAY_OFF_TIMEOUT_US);
+            }
+#endif
             ESP_LOGI(TAG, "display dimmed after inactivity");
         } else {
             ESP_LOGW(TAG, "dim display failed: %s", esp_err_to_name(err));
@@ -2865,6 +2922,24 @@ static esp_err_t init_display_dim_timer(void)
     };
     return esp_timer_create(&timer_args, &s_display_dim_timer);
 }
+
+#if CONFIG_VOICE_BOARD_WATCH206
+static void display_off_timer_cb(void *arg)
+{
+    (void)arg;
+    /* Ueber die Warteschlange: Sleep-In nimmt die LVGL-Sperre, nichts fuer den Zeitgeber-Strang. */
+    queue_app_event(APP_EVENT_DISPLAY_OFF);
+}
+
+static esp_err_t init_display_off_timer(void)
+{
+    const esp_timer_create_args_t timer_args = {
+        .callback = display_off_timer_cb,
+        .name = "display_off",
+    };
+    return esp_timer_create(&timer_args, &s_display_off_timer);
+}
+#endif
 
 static void deep_sleep_timer_cb(void *arg)
 {
@@ -3081,6 +3156,7 @@ void app_main(void)
     ESP_ERROR_CHECK(init_recording_tick_timer());
 #if CONFIG_VOICE_BOARD_WATCH206
     ESP_ERROR_CHECK(init_home_timer());
+    ESP_ERROR_CHECK(init_display_off_timer());
     /* Aus dem Tiefschlaf zurueck: die Einstellungen aus der App stehen im RTC-Speicher. */
     apply_watch_settings_ui();
     /* ui_status_init() hat den NVS schon aufgesetzt (Verlauf). */

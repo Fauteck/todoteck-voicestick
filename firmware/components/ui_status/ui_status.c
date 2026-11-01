@@ -2506,6 +2506,37 @@ esp_err_t ui_status_set_brightness(uint8_t brightness)
 #endif
 }
 
+void ui_status_set_display_off(bool off)
+{
+#if UI_WATCH
+    if (!s_display) {
+        return;
+    }
+    _lock_acquire(&s_lvgl_lock);
+    lv_timer_t *refr = lv_display_get_refr_timer(s_display);
+    if (off) {
+        ui_display_watch206_sleep();
+        /*
+         * Ohne Bild braucht es kein Neuzeichnen: Der Refresh-Zeitgeber
+         * (33 ms) pausiert, und die LVGL-Task schlaeft bis zum naechsten
+         * eigenen Zeitgeber statt dreissigmal je Sekunde aufzuwachen.
+         */
+        if (refr) {
+            lv_timer_pause(refr);
+        }
+    } else {
+        if (refr) {
+            lv_timer_resume(refr);
+        }
+        lv_obj_invalidate(lv_screen_active());
+        ui_display_watch206_wake();
+    }
+    _lock_release(&s_lvgl_lock);
+#else
+    (void)off;
+#endif
+}
+
 void ui_status_prepare_deep_sleep(void)
 {
     (void)ui_status_set_brightness(0);
