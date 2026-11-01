@@ -138,9 +138,22 @@ static void report_raise(float tilt)
 #define QMI_STATUS1 0x2F
 #define QMI_AX_L 0x35
 
-/* CTRL1: Adressen fortlaufend, Datenreihenfolge wie bisher, INT1 als Ausgang. */
-#define QMI_CTRL1_BASE 0x60
-#define QMI_CTRL1_INT1_EN 0x10
+/*
+ * CTRL1 (0x02) laut Registerbeschreibung des QMI8658A:
+ *   Bit 7  SIM            SPI 3-Draht (hier I2C: 0)
+ *   Bit 6  ADDR_AI        Adresse zaehlt beim Lesen mehrerer Bytes weiter
+ *   Bit 5  BE             Big Endian in den Datenregistern
+ *   Bit 4  INT2_EN        INT2 als Ausgang
+ *   Bit 3  INT1_EN        INT1 als Ausgang
+ *   Bit 2  FIFO_INT_SEL   FIFO-Interrupt auf INT1 statt INT2
+ *   Bit 0  SensorDisable  interne 2-MHz-Versorgung aus
+ * Bis 0.4.1 stand hier 0x60 | 0x10: Bit 5 schaltete Big Endian, read_acce
+ * setzt die Bytes aber Little Endian zusammen (Low zuerst), und 0x10 machte
+ * INT2 zum Ausgang -- INT1, an dem GPIO21 haengt, blieb hochohmig. Richtig:
+ * nur ADDR_AI (0x40) und INT1_EN (0x08).
+ */
+#define QMI_CTRL1_BASE 0x40
+#define QMI_CTRL1_INT1_EN 0x08
 /* CTRL8 Bit 7: CTRL9-Handshake ueber STATUSINT.7 statt ueber die INT1-Leitung. */
 #define QMI_CTRL8_HANDSHAKE_STATUSINT 0x80
 /*
@@ -368,12 +381,15 @@ static esp_err_t int_pin_create(void)
      * den Interrupt erst beim naechsten ohnehin faelligen Aufwachen sehen --
      * mit dem langsamen Verbindungsintervall bis zu zwei Sekunden spaeter.
      * Die Tasten (espressif/button, enable_power_save) machen es genauso.
+     *
+     * Hier nur die Weckquelle "GPIO" freigeben; welcher Pin weckt, setzt
+     * arm() mit gpio_wakeup_enable und disarm() nimmt es zurueck. Bis 0.4.1
+     * stand gpio_wakeup_enable dauerhaft hier: Solange WoM nicht scharf ist,
+     * treibt der Sensor die Leitung nicht und der Pin floatet ohne Pull --
+     * ein schwebender Low-Pegel weckt den Chip dann aus jedem Light Sleep
+     * sofort wieder auf.
      */
-    err = gpio_wakeup_enable(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
-    if (err == ESP_OK) {
-        err = esp_sleep_enable_gpio_wakeup();
-    }
-    return err;
+    return esp_sleep_enable_gpio_wakeup();
 }
 
 /*
@@ -438,6 +454,8 @@ static void arm(void)
     }
     wom_clear();
     s_int_fired = false;
+    /* Erst jetzt treibt der Sensor die Leitung auf Ruhepegel 1: Weckquelle und Interrupt scharf. */
+    (void)gpio_wakeup_enable(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
     gpio_intr_enable(WOM_INT_GPIO);
     s_armed = true;
 }
@@ -445,6 +463,7 @@ static void arm(void)
 static void disarm(void)
 {
     gpio_intr_disable(WOM_INT_GPIO);
+    (void)gpio_wakeup_disable(WOM_INT_GPIO);
     (void)wom_disarm(false);
     s_armed = false;
 }
@@ -493,6 +512,14 @@ esp_err_t wrist_wake_init(wrist_wake_cb_t on_raise)
         s_qmi = NULL;
         return err;
     }
+    /*
+     * Diagnose fuer den Monitor: INT1 ist jetzt Ausgang (CTRL1), WoM noch
+     * nicht scharf. Treibt der Sensor die Leitung, steht hier stabil 0 oder 1;
+     * floatet sie (falsches CTRL1-Bit, andere Leitung), wechselt der Wert von
+     * Start zu Start.
+     */
+    ESP_LOGI(TAG, "QMI8658 INT1 an GPIO%d: Pegel %d", (int)WOM_INT_GPIO,
+             gpio_get_level(WOM_INT_GPIO));
     s_on_raise = on_raise;
 
     BaseType_t ok = xTaskCreate(wrist_task, "wrist", 3072, NULL, 2, NULL);
@@ -536,6 +563,7 @@ void wrist_wake_prepare_deep_sleep(void)
      * der Task ist deshalb unschaedlich.
      */
     gpio_intr_disable(WOM_INT_GPIO);
+    (void)gpio_wakeup_disable(WOM_INT_GPIO);
     (void)wom_disarm(false);
     s_armed = false;
 }

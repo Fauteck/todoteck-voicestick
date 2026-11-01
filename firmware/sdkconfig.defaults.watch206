@@ -15,6 +15,11 @@ CONFIG_LV_USE_CLIB_MALLOC=y
 # Taktfrequenz (Paket H, Punkt 5): Das hier ist nur das Maximum, das esp_pm
 # mit der Sperre beim Aufnehmen (Opus) und bei OTA anfaehrt. Im Leerlauf
 # laeuft der Chip auf XTAL (40 MHz) oder schlaeft, bei hellem Schirm haelt
-# eine APB-Sperre 80 MHz -- siehe init_power_management in main.c. Der StickS3
-# bleibt bei der Vorgabe von 160.
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# eine APB-Sperre 80 MHz -- siehe init_power_management in main.c.
+#
+# 160 wie beim StickS3, nicht 240: 0.4.1 setzte 240 und startete auf der Uhr
+# nicht mehr (Absturz vor der OTA-Bestaetigung, Rueckfall auf 0.4.0, das mit
+# 160 lief). Ein deterministischer Fehler fand sich im Diff nicht; 240 MHz
+# beim Start mit hellem AMOLED, PSRAM und Funk am Akku ist aber ein
+# Brownout-Kandidat, und Opus braucht die 240 nicht. Seit 0.4.2 wieder 160.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
