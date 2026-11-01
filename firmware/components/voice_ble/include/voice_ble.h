@@ -42,8 +42,17 @@ bool voice_ble_is_ready(void);
 bool voice_ble_ota_is_active(void);
 esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
                                const uint8_t *opus_payload, size_t len);
+/*
+ * Verbindungsintervall: schnell (15-30 ms) fuers Aufnehmen, OTA und
+ * Listen-/Wetter-Uebertragung, langsam (400-500 ms, Latency 4) im Leerlauf.
+ */
 esp_err_t voice_ble_request_fast_interval(void);
 esp_err_t voice_ble_request_slow_interval(void);
+/*
+ * Unverbunden: die schnellen 30 Sekunden Werbung (60-120 ms) neu starten,
+ * etwa nach einem Tastendruck. Verbunden oder schon schnell: tut nichts.
+ */
+void voice_ble_advertise_fast(void);
 esp_err_t voice_ble_send_device_info(void);
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id);
 esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,

@@ -250,6 +250,15 @@ static esp_timer_handle_t s_deep_sleep_timer;
 static esp_timer_handle_t s_battery_refresh_timer;
 static esp_timer_handle_t s_host_response_timer;
 static esp_timer_handle_t s_recording_tick_timer;
+/*
+ * Bluetooth gestaffelt (Paket H, Punkt 4): Waehrend die Bruecke Zifferblatt,
+ * Listen oder Wetter schickt, laeuft die Verbindung schnell; drei Sekunden
+ * nach dem letzten dieser Schreibvorgaenge faellt sie auf langsam zurueck
+ * (400-500 ms, Latency 4, voice_ble.c). Aufnahme und OTA halten sie selbst
+ * schnell. `ready`/`no_speech`/`error` schalten zusaetzlich sofort langsam.
+ */
+static esp_timer_handle_t s_ble_settle_timer;
+#define BLE_TRANSFER_SETTLE_US (3 * 1000 * 1000ULL)
 static int64_t s_recording_started_us;
 /* Wieviele Aufnahme-Takte hintereinander die Taste los gemeldet haben. */
 static uint8_t s_release_ticks;
@@ -358,6 +367,8 @@ typedef enum {
     APP_EVENT_BATTERY_LOG_REQUEST,
     /* 15 Sekunden gedimmt vorbei: Schirm aus (Uhr). */
     APP_EVENT_DISPLAY_OFF,
+    /* Drei Sekunden ohne Uebertragung der Bruecke: Verbindung wieder langsam. */
+    APP_EVENT_BLE_SETTLE,
 } app_event_type_t;
 
 typedef struct {
@@ -680,6 +691,22 @@ static void note_user_input(void)
     s_answer_unread = false;
 #endif
     note_activity();
+    /* Unverbunden: Wer das Geraet anfasst, will es auch finden -- 30 s schnelle Werbung. */
+    voice_ble_advertise_fast();
+}
+
+/*
+ * Die Bruecke schickt gerade etwas Groesseres (Zifferblatt, Liste, Wetter)
+ * oder wird es gleich (Verbindung, glance_request): Verbindung schnell, und
+ * den Rueckfall auf langsam von vorn zaehlen.
+ */
+static void note_ble_transfer(void)
+{
+    (void)voice_ble_request_fast_interval();
+    if (s_ble_settle_timer) {
+        (void)esp_timer_stop(s_ble_settle_timer);
+        (void)esp_timer_start_once(s_ble_settle_timer, BLE_TRANSFER_SETTLE_US);
+    }
 }
 
 static void stop_host_response_timer(void)
@@ -936,6 +963,8 @@ static uint32_t start_recording(void)
      * haelt, gibt es ohnehin nichts aufzuwecken.
      */
     wrist_wake_watch(false);
+    /* Opus-Rahmen alle 20 ms: dafuer das schnelle Intervall, bis die Antwort da ist. */
+    (void)voice_ble_request_fast_interval();
 
     esp_err_t err = acquire_recording_pm_locks();
     if (err != ESP_OK) {
@@ -991,6 +1020,8 @@ static uint32_t stop_recording(void)
     release_recording_pm_locks();
     restart_display_dim_timer();
     restart_deep_sleep_timer();
+    /* Nicht sofort langsam: Transkript und Antwort kommen gleich; der Rueckfall zaehlt ab jetzt. */
+    note_ble_transfer();
     return session_id;
 }
 
@@ -1567,10 +1598,13 @@ static void ble_control_cb(const char *json)
                                                                           : ""),
                              ref_value >= 1 && ref_value <= 65535 ? (uint16_t)ref_value : 0);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "face") == 0) {
+        note_ble_transfer();
         apply_face_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
+        note_ble_transfer();
         apply_list_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "weather") == 0) {
+        note_ble_transfer();
         apply_weather_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "watch_settings") == 0) {
         apply_watch_settings_command(root);
@@ -1696,6 +1730,7 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
         s_app_ui_state = APP_UI_STATE_ERROR;
         ui_status_set_error(text && text[0] ? text : "Unbekannter Fehler");
         play_tone(AUDIO_TONE_ERROR);
+        voice_ble_request_slow_interval();
     } else if (strcmp(state, "no_speech") == 0) {
         s_app_ui_state = APP_UI_STATE_NO_SPEECH;
         ui_status_set_no_speech(text);
@@ -2363,6 +2398,7 @@ static void handle_touch(const app_event_t *event)
             break;
         }
         ui_cards_show(UI_CARD_TODAY);
+        note_ble_transfer();
         (void)voice_ble_send_glance_request();
         break;
     case VOICE_BOARD_SWIPE_RIGHT:
@@ -2382,6 +2418,7 @@ static void handle_touch(const app_event_t *event)
          * nichts und zieht die Karte nach, sobald er da ist.
          */
         ui_cards_show(UI_CARD_TODAY);
+        note_ble_transfer();
         (void)voice_ble_send_glance_request();
         break;
     default:
@@ -2596,6 +2633,11 @@ static void app_event_task(void *arg)
             send_battery_log(event.epoch);
 #endif
             break;
+        case APP_EVENT_BLE_SETTLE:
+            if (!s_recording && !s_ota_updating && !voice_ble_ota_is_active()) {
+                (void)voice_ble_request_slow_interval();
+            }
+            break;
         case APP_EVENT_DISPLAY_OFF:
 #if CONFIG_VOICE_BOARD_WATCH206
             if (s_display_dimmed && !s_recording && !s_ota_updating && !s_night_mode) {
@@ -2626,6 +2668,8 @@ static void app_event_task(void *arg)
             ui_status_set_link(true);
             ui_status_set_idle();
             note_activity();
+            /* Gleich kommen device_info-Antwort, Zeit, Zifferblatt und Karten. */
+            note_ble_transfer();
             break;
         case APP_EVENT_BLE_DISCONNECTED:
             s_recording = false;
@@ -2701,6 +2745,7 @@ static void app_event_task(void *arg)
              */
 #if WRIST_WAKE_ENABLED
             note_activity();
+            voice_ble_advertise_fast();
 #endif
             break;
         case APP_EVENT_TIME:
@@ -2995,6 +3040,21 @@ static esp_err_t init_home_timer(void)
 }
 #endif
 
+static void ble_settle_timer_cb(void *arg)
+{
+    (void)arg;
+    queue_app_event(APP_EVENT_BLE_SETTLE);
+}
+
+static esp_err_t init_ble_settle_timer(void)
+{
+    const esp_timer_create_args_t timer_args = {
+        .callback = ble_settle_timer_cb,
+        .name = "ble_settle",
+    };
+    return esp_timer_create(&timer_args, &s_ble_settle_timer);
+}
+
 static esp_err_t init_host_response_timer(void)
 {
     const esp_timer_create_args_t timer_args = {
@@ -3153,6 +3213,7 @@ void app_main(void)
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());
     ESP_ERROR_CHECK(init_host_response_timer());
+    ESP_ERROR_CHECK(init_ble_settle_timer());
     ESP_ERROR_CHECK(init_recording_tick_timer());
 #if CONFIG_VOICE_BOARD_WATCH206
     ESP_ERROR_CHECK(init_home_timer());
