@@ -23,6 +23,8 @@ uint8_t ui_status_font_level(void);
  * Ausblenden von Karten, Kontrollzentrum und Taschenlampe. Sperre gehalten.
  */
 void ui_status_header_refresh_locked(void);
+/* Nachtlade-Modus aktiv? Dann vibriert und piept nichts (ui_cards.c fragt vor der Warn-Vibration). */
+bool ui_status_night_mode(void);
 
 /*
  * Seitenpunkte (nur die Uhr): eine Reihe, hoechstens UI_DOTS_MAX Punkte von

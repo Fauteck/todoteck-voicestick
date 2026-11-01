@@ -23,6 +23,7 @@
 
 #include "audio_pipeline.h"
 #include "audio_tone.h"
+#include "battery_estimate.h"
 #include "voice_board.h"
 #include "esp_ota_ops.h"
 #include "ui_cards.h"
@@ -171,6 +172,28 @@ static int64_t s_answer_at_us;
 #define TOP_EDGE_PX 80
 /* Bis hierher zaehlt ein Wischen nach rechts als "vom linken Rand": zurueck (absolute x). */
 #define BACK_EDGE_PX 30
+/*
+ * Akku-Restzeit (Paket G, 16): Stichproben alle zehn Minuten im RTC-Speicher,
+ * damit sie den Tiefschlaf ueberleben; nur ohne Kabel, am Kabel wird der
+ * Ring geleert. Die Rechnung steht in battery_estimate.h.
+ */
+static RTC_DATA_ATTR battery_ring_t s_battery_ring;
+static char s_battery_remaining[24];
+#define BATTERY_FACE_HINT_PERCENT 20
+/*
+ * Nachtlade-Modus (Paket G, 17): am USB-Kabel zwischen 22 und 6 Uhr Ortszeit
+ * zeigt das Zifferblatt nur die dunkelgraue Uhrzeit bei Helligkeit 20,
+ * nichts vibriert, kein Ton. Jede Beruehrung zeigt zehn Sekunden das normale
+ * Zifferblatt (s_night_peek). Ende bei Kabel ab oder um 6 Uhr -- geprueft im
+ * Akku-Takt, alle zehn Sekunden.
+ */
+static bool s_night_mode;
+static bool s_night_peek;
+static esp_timer_handle_t s_night_peek_timer;
+#define NIGHT_BRIGHTNESS 20
+#define NIGHT_PEEK_US (10 * 1000 * 1000ULL)
+#define NIGHT_FROM_HOUR 22
+#define NIGHT_TO_HOUR 6
 #endif
 /* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
 static bool s_action_fired;
@@ -288,6 +311,8 @@ typedef enum {
     APP_EVENT_TRANSCRIPT,
     /* Rueckkehr-Zeitgeber der Uhr abgelaufen. */
     APP_EVENT_HOME_TIMEOUT,
+    /* Die zehn Sekunden normales Zifferblatt im Nachtlade-Modus sind vorbei. */
+    APP_EVENT_NIGHT_PEEK_END,
 } app_event_type_t;
 
 typedef struct {
@@ -374,6 +399,20 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
 static bool is_external_powered(void)
 {
     return s_battery_charging || s_usb_powered;
+}
+
+/*
+ * Jede Vibration der Uhr geht hier durch: im Nachtlade-Modus bleibt der
+ * Motor still (auf dem StickS3 gibt es ohnehin keinen).
+ */
+static void haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (s_night_mode) {
+        return;
+    }
+#endif
+    voice_board_haptic_pattern(count, on_ms, off_ms);
 }
 
 /*
@@ -740,16 +779,16 @@ static void haptic_for_tone(audio_tone_t tone)
 {
     switch (tone) {
     case AUDIO_TONE_START:
-        voice_board_haptic_pattern(1, 60, 0);
+        haptic_pattern(1, 60, 0);
         break;
     case AUDIO_TONE_DONE:
-        voice_board_haptic_pattern(2, 50, 90);
+        haptic_pattern(2, 50, 90);
         break;
     case AUDIO_TONE_ERROR:
-        voice_board_haptic_pattern(1, 300, 0);
+        haptic_pattern(1, 300, 0);
         break;
     case AUDIO_TONE_CANCEL:
-        voice_board_haptic_pattern(1, 30, 0);
+        haptic_pattern(1, 30, 0);
         break;
     default:
         break;
@@ -762,6 +801,11 @@ static void play_tone(audio_tone_t tone)
     if (s_silent) {
         return;
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (s_night_mode) {
+        return;
+    }
+#endif
     if (audio_pipeline_is_busy()) {
         ESP_LOGD(TAG, "Ton uebersprungen, Aufnahmepfad belegt");
         return;
@@ -1373,7 +1417,7 @@ static void check_event_reminder(void)
     if (now >= start - EVENT_REMINDER_LEAD_S && now < start) {
         s_event_reminded = true;
         ESP_LOGI(TAG, "Termin in %lld s -> Erinnerung", (long long)(start - now));
-        voice_board_haptic_pattern(3, 120, 150);
+        haptic_pattern(3, 120, 150);
         note_activity();
         ui_status_show_home();
     }
@@ -1631,7 +1675,103 @@ static ui_control_state_t control_state(void)
         .saver = s_saver,
         .battery_percent = s_battery_percent,
         .charging = s_battery_charging,
+        .remaining = s_battery_remaining,
     };
+}
+
+/* Ortsstunde aus Systemzeit und gemeldetem Abstand; -1 ohne gestellte Uhr. */
+static int local_hour_now(void)
+{
+    if (!s_clock_valid) {
+        return -1;
+    }
+    const time_t now = time(NULL) + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&now, &parts);
+    return parts.tm_hour;
+}
+
+/* Nachtlade-Modus an oder aus: Anzeige und Helligkeit folgen. */
+static void set_night_mode(bool on)
+{
+    if (s_night_mode == on) {
+        return;
+    }
+    s_night_mode = on;
+    ESP_LOGI(TAG, "Nachtlade-Modus %s", on ? "an" : "aus");
+    ui_status_set_night_mode(on);
+    if (on) {
+        if (s_display_dim_timer) {
+            (void)esp_timer_stop(s_display_dim_timer);
+        }
+        s_display_dimmed = false;
+        ui_status_set_idle_dimmed(false);
+        (void)ui_status_set_brightness(NIGHT_BRIGHTNESS);
+    } else {
+        (void)ui_status_set_brightness(active_brightness());
+        restart_display_dim_timer();
+    }
+}
+
+/*
+ * Gilt der Nachtlade-Modus gerade? Am USB-Kabel, zwischen 22 und 6 Uhr, und
+ * nicht waehrend der zehn Sekunden nach einer Beruehrung. Gerufen im
+ * Akku-Takt und nach dem Ende der zehn Sekunden.
+ */
+static void update_night_mode(void)
+{
+    const int hour = local_hour_now();
+    const bool window = hour >= 0 && (hour >= NIGHT_FROM_HOUR || hour < NIGHT_TO_HOUR);
+    set_night_mode(s_usb_powered && window && !s_night_peek && !s_recording && !s_ota_updating);
+}
+
+static void night_peek_timer_cb(void *arg)
+{
+    (void)arg;
+    queue_app_event(APP_EVENT_NIGHT_PEEK_END);
+}
+
+/* Eine Beruehrung im Nachtlade-Modus: zehn Sekunden das normale Zifferblatt. */
+static void start_night_peek(void)
+{
+    if (!s_night_peek_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = night_peek_timer_cb,
+            .name = "night_peek",
+        };
+        if (esp_timer_create(&args, &s_night_peek_timer) != ESP_OK) {
+            return;
+        }
+    }
+    s_night_peek = true;
+    set_night_mode(false);
+    (void)esp_timer_stop(s_night_peek_timer);
+    (void)esp_timer_start_once(s_night_peek_timer, NIGHT_PEEK_US);
+}
+
+/*
+ * Akku-Restzeit nachfuehren (alle zehn Sekunden, aus update_battery_status):
+ * Stichprobe alle zehn Minuten ohne Kabel; am Kabel leert sich der Ring.
+ * Die Kachel bekommt "noch 9 h", das Zifferblatt ab 20 % "noch etwa 2 h".
+ */
+static void update_battery_estimate(int level, bool external)
+{
+    const int64_t now = (int64_t)time(NULL);
+    if (external) {
+        battery_ring_clear(&s_battery_ring);
+    } else if (battery_ring_due(&s_battery_ring, now)) {
+        battery_ring_add(&s_battery_ring, now, level);
+    }
+    const int32_t minutes = external ? -1 : battery_ring_remaining_min(&s_battery_ring, level);
+    battery_format_remaining(s_battery_remaining, sizeof(s_battery_remaining), minutes, false);
+    char face[24];
+    battery_format_remaining(face, sizeof(face), level <= BATTERY_FACE_HINT_PERCENT ? minutes : -1,
+                             true);
+    ui_status_set_battery_remaining(face);
+    if (ui_control_visible()) {
+        const ui_control_state_t st = control_state();
+        ui_control_update(&st);
+    }
 }
 
 static void apply_brightness_now(void)
@@ -1667,7 +1807,7 @@ static void handle_control_tile(int tile)
     default:
         return;
     }
-    voice_board_haptic_pattern(1, 25, 0);
+    haptic_pattern(1, 25, 0);
     const ui_control_state_t st = control_state();
     ui_control_update(&st);
 }
@@ -1682,7 +1822,7 @@ static void cancel_transcript(void)
     ESP_LOGI(TAG, "Transkript abgebrochen");
     if (voice_ble_send_cancel_transcript() == ESP_OK) {
         ui_status_set_transcript_cancelled();
-        voice_board_haptic_pattern(1, 40, 0);
+        haptic_pattern(1, 40, 0);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -1848,7 +1988,7 @@ static bool handle_history_chip(int16_t x, int16_t y)
         return false;
     }
     if (err == ESP_OK) {
-        voice_board_haptic_pattern(1, 30, 0);
+        haptic_pattern(1, 30, 0);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -1872,6 +2012,12 @@ static void handle_touch(const app_event_t *event)
         /* Taschenlampe: jede Beruehrung schaltet sie aus. */
         ui_torch_set(false);
         apply_brightness_now();
+        note_user_input();
+        return;
+    }
+    if (s_night_mode) {
+        /* Nachts am Kabel: die Beruehrung zeigt zehn Sekunden das normale Zifferblatt, sonst nichts. */
+        start_night_peek();
         note_user_input();
         return;
     }
@@ -1930,7 +2076,7 @@ static void handle_touch(const app_event_t *event)
                                                         event->touch_y, &hit);
         if (action == UI_CARDS_ITEM) {
             if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                voice_board_haptic_pattern(1, 40, 0);
+                haptic_pattern(1, 40, 0);
                 /*
                  * Karten-Aktion als Verlaufseintrag (V5): "Erledigt: Muell
                  * rausstellen" bzw. "Licht Kueche: An", mit den Koordinaten
@@ -1950,7 +2096,7 @@ static void handle_touch(const app_event_t *event)
             ESP_LOGI(TAG, "Rueckgaengig: %s #%u", ui_cards_kind_name(hit.kind),
                      (unsigned)hit.index);
             if (voice_ble_send_undo(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                voice_board_haptic_pattern(1, 30, 0);
+                haptic_pattern(1, 30, 0);
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
             }
@@ -1959,10 +2105,10 @@ static void handle_touch(const app_event_t *event)
             ui_status_show_home();
         } else if (action == UI_CARDS_SELECT) {
             /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
-            voice_board_haptic_pattern(1, 20, 0);
+            haptic_pattern(1, 20, 0);
         } else if (action == UI_CARDS_END) {
             /* Rechts von Wetter kommt nichts mehr: ein kurzer Stoss sagt das. */
-            voice_board_haptic_pattern(1, 15, 0);
+            haptic_pattern(1, 15, 0);
         }
         return;
     }
@@ -1987,7 +2133,7 @@ static void handle_touch(const app_event_t *event)
             play_tone(AUDIO_TONE_CANCEL);
             break;
         }
-        voice_board_haptic_pattern(1, 30, 0);
+        haptic_pattern(1, 30, 0);
         apply_app_ui_state("thinking", "", "");
         break;
     }
@@ -2229,6 +2375,12 @@ static void app_event_task(void *arg)
             handle_home_timeout();
 #endif
             break;
+        case APP_EVENT_NIGHT_PEEK_END:
+#if CONFIG_VOICE_BOARD_WATCH206
+            s_night_peek = false;
+            update_night_mode();
+#endif
+            break;
         case APP_EVENT_ACTION:
             /*
              * Die Aktionstaste: was sie tut, legt die Bruecke fest (ein Satz,
@@ -2240,7 +2392,7 @@ static void app_event_task(void *arg)
                 break;
             }
             if (voice_ble_send_action() == ESP_OK) {
-                voice_board_haptic_pattern(2, 40, 60);
+                haptic_pattern(2, 40, 60);
                 apply_app_ui_state("thinking", "", "");
             } else {
                 ui_status_set_not_connected();
@@ -2330,6 +2482,15 @@ static void app_event_task(void *arg)
 #endif
             break;
         case APP_EVENT_TIME:
+#if CONFIG_VOICE_BOARD_WATCH206
+            {
+                /* Springt die Uhr um mehr als fuenf Minuten, taugen die Akku-Stichproben nichts mehr. */
+                const int64_t jump = event.epoch - (int64_t)time(NULL);
+                if (jump > 300 || jump < -300) {
+                    battery_ring_clear(&s_battery_ring);
+                }
+            }
+#endif
             s_clock_offset_min = event.tz_offset_min;
             s_clock_valid = true;
             ui_status_set_clock(event.epoch, event.tz_offset_min);
@@ -2503,6 +2664,12 @@ static void display_dim_timer_cb(void *arg)
 {
     (void)arg;
 
+#if CONFIG_VOICE_BOARD_WATCH206
+    /* Nachts am Kabel steht die Helligkeit fest bei NIGHT_BRIGHTNESS; "gedimmt" waere heller. */
+    if (s_night_mode) {
+        return;
+    }
+#endif
     if (!s_display_dimmed && !s_recording && !s_ota_updating) {
         esp_err_t err = ui_status_set_brightness(DISPLAY_DIM_BRIGHTNESS);
         if (err == ESP_OK) {
@@ -2703,6 +2870,8 @@ static void update_battery_status(void)
         s_battery_percent = level;
         ui_status_set_battery(level, charging, usb_powered);
 #if CONFIG_VOICE_BOARD_WATCH206
+        update_battery_estimate(level, charging || usb_powered);
+        update_night_mode();
         if (charging || usb_powered) {
             s_saver_auto_done = false;
         } else if (!s_saver && !s_saver_auto_done && level <= SAVER_AUTO_PERCENT) {

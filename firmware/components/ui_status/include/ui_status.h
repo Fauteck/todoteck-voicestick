@@ -135,6 +135,17 @@ void ui_status_restore_clock(int32_t tz_offset_min);
 void ui_status_set_recording_meter(uint8_t level_percent, uint8_t remaining_percent);
 void ui_status_set_recording(uint32_t session_id);
 void ui_status_set_battery(int level_percent, bool charging, bool usb_powered);
+/*
+ * Akku-Restzeit fuer das Zifferblatt ("noch etwa 2 h"), fertig formatiert von
+ * main.c; leer = nichts zeigen. Steht rot unter den Zifferblatt-Zeilen (nur die Uhr).
+ */
+void ui_status_set_battery_remaining(const char *line);
+/*
+ * Nachtlade-Modus (nur die Uhr): am Kabel zwischen 22 und 6 Uhr zeigt das
+ * Zifferblatt nur die grosse Uhrzeit in Dunkelgrau -- keine Zeilen, kein
+ * Tecki, keine Kopfzeile. Andere Szenen bleiben, wie sie sind.
+ */
+void ui_status_set_night_mode(bool on);
 void ui_status_set_partial_text(const char *text);
 void ui_status_set_ota_progress(uint32_t written, uint32_t size);
 void ui_status_set_ota_rebooting(void);

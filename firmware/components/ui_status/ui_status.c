@@ -222,8 +222,12 @@ static int32_t s_clock_offset_min;
  * Display steht.
  */
 static bool s_link_connected;
-/* Faerbt die Akkuzahl: rot unter 20 Prozent, blau am Strom, sonst gedaempft. */
+/* Faerbt die Akkuzahl: rot ab 10 Prozent (bis 0.3.6: 20), blau am Strom, sonst gedaempft. */
 static bool s_battery_low;
+/* Restzeit fuers Zifferblatt ("noch etwa 2 h"), fertig aus main.c; leer = nichts. */
+static char s_battery_remaining[24];
+/* Nachtlade-Modus: nur die grosse Uhrzeit, dunkelgrau (ui_status_set_night_mode). */
+static bool s_night_mode;
 static bool s_battery_charging;
 /* Gedaempfte Farbe der laufenden Szene — hell auf Creme, blass auf Dunkel. */
 static lv_color_t s_muted_colour;
@@ -322,7 +326,9 @@ static char s_face[UI_STATUS_FACE_LINES][UI_STATUS_FACE_LEN];
 static uint8_t s_face_count;
 static char s_event_title[UI_STATUS_FACE_LEN];
 static int64_t s_event_start;
-static lv_obj_t *s_face_label[UI_STATUS_FACE_LINES + 1];
+/* Termin, bis drei Zeilen der Bruecke, dazu die rote Akku-Restzeit. */
+#define FACE_LABELS (UI_STATUS_FACE_LINES + 2)
+static lv_obj_t *s_face_label[FACE_LABELS];
 /*
  * Teckis Stimmung fuer ein paar Sekunden ueber der Szene: freut sich ueber
  * eine Antwort, schaut beim Wischen in die Richtung. Laeuft ab und faellt
@@ -1453,7 +1459,7 @@ static void render_face_lines_locked(bool visible, const char *event_line)
         return;
     }
     int row = 0;
-    for (int i = 0; i < UI_STATUS_FACE_LINES + 1; i++) {
+    for (int i = 0; i < FACE_LABELS; i++) {
         lv_obj_add_flag(s_face_label[i], LV_OBJ_FLAG_HIDDEN);
     }
     if (!visible) {
@@ -1466,9 +1472,16 @@ static void render_face_lines_locked(bool visible, const char *event_line)
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
         row++;
     }
-    for (int i = 0; i < s_face_count && row < UI_STATUS_FACE_LINES + 1; i++, row++) {
+    for (int i = 0; i < s_face_count && row < FACE_LABELS - 1; i++, row++) {
         lv_label_set_text(s_face_label[row], s_face[i]);
         lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0xc9d1d9), 0);
+        lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + row * FACE_LINE_H);
+        lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
+    }
+    /* Akku knapp: die Restzeit rot als letzte Zeile (bei <= 20 %, main.c entscheidet). */
+    if (s_battery_remaining[0] && row < FACE_LABELS) {
+        lv_label_set_text(s_face_label[row], s_battery_remaining);
+        lv_obj_set_style_text_color(s_face_label[row], lv_color_hex(0xe74c3c), 0);
         lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + row * FACE_LINE_H);
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
     }
@@ -1541,6 +1554,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
 
     const bool with_clock = clock_scene(scene, s_text_kind);
     const bool clock_only = clock_only_scene(scene, s_text_kind, hint);
+    /* Nachtlade-Modus: nur auf dem Ziffernblatt, nur die Uhrzeit, dunkelgrau. */
+    const bool night = UI_WATCH && s_night_mode && clock_only;
     s_main_clock_shown = with_clock;
 
     const char *body_text = hint ? hint : "";
@@ -1611,7 +1626,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         status_shown = "Fehler";
     }
 
-    ui_status_icons_show(&s_icons, clock_only || plan.tecki);
+    ui_status_icons_show(&s_icons, (clock_only || plan.tecki) && !night);
 
     /*
      * Die Zeile ueber dem Text: die Frage, wenn es eine gibt, sonst das
@@ -1644,8 +1659,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                                    clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
         char event_line[UI_STATUS_FACE_LEN + 40];
         format_event(event_line, sizeof(event_line));
-        const bool face_info = clock_only && (s_face_count > 0 || event_line[0]) &&
-                               s_face_label[0] != NULL;
+        const bool face_info = clock_only && !night && s_face_label[0] != NULL &&
+                               (s_face_count > 0 || event_line[0] || s_battery_remaining[0]);
         s_clock_col_x = clock_only ? 0 : plan.x;
         s_clock_col_w = clock_only ? CONTENT_W : plan.width;
         s_clock_col_y = clock_only ? CLOCK_FACE_Y : CLOCK_Y;
@@ -1856,13 +1871,22 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, question_text[0] ? muted : text, 0);
-    lv_obj_set_style_text_color(s_clock_label, text, 0);
+    const lv_color_t clock_colour = night ? lv_color_hex(0x3a4656) : text;
+    lv_obj_set_style_text_color(s_clock_label, clock_colour, 0);
 #if UI_WATCH
     for (int i = 0; i < CLOCK_CELLS; i++) {
-        lv_obj_set_style_text_color(s_clock_cell[i], text, 0);
+        lv_obj_set_style_text_color(s_clock_cell[i], clock_colour, 0);
     }
     lv_obj_set_style_text_color(s_meta_label, muted, 0);
 #endif
+    /* Nachts am Kabel bleibt auch die Kopfzeile dunkel: nur die Ziffern. */
+    if (night) {
+        lv_obj_add_flag(s_ble_dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(s_ble_dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_set_style_text_color(s_hint_label, plan.tecki ? hint_color : text, 0);
     s_muted_colour = muted;
     lv_obj_set_style_text_color(s_position_label, muted, 0);
@@ -1971,7 +1995,7 @@ static void create_status_ui(void)
     ui_status_icons_create(&s_icons, s_screen);
 
 #if UI_WATCH
-    for (int i = 0; i < UI_STATUS_FACE_LINES + 1; i++) {
+    for (int i = 0; i < FACE_LABELS; i++) {
         s_face_label[i] = lv_label_create(s_screen);
         lv_obj_set_style_text_font(s_face_label[i], &todoteck_watch_font_23, 0);
         lv_label_set_long_mode(s_face_label[i], LV_LABEL_LONG_DOT);
@@ -3425,7 +3449,7 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
          * am Ladegeraet, sonst gedaempft. Vorher sagte das der Fuellstand
          * des Symbols — das Symbol ist weg, die Aussage bleibt.
          */
-        s_battery_low = level_percent <= 20;
+        s_battery_low = level_percent <= 10;
         const bool was_tired = s_battery_percent >= 0 &&
                                s_battery_percent <= TECKI_TIRED_PERCENT && !s_battery_charging;
         s_battery_charging = charging || usb_powered;
@@ -3439,6 +3463,33 @@ void ui_status_set_battery(int level_percent, bool charging, bool usb_powered)
         }
     }
     _lock_release(&s_lvgl_lock);
+}
+
+void ui_status_set_battery_remaining(const char *line)
+{
+    char copy[sizeof(s_battery_remaining)];
+    copy_utf8_display(copy, line ? line : "", sizeof(copy));
+    _lock_acquire(&s_lvgl_lock);
+    if (strcmp(copy, s_battery_remaining) != 0) {
+        strlcpy(s_battery_remaining, copy, sizeof(s_battery_remaining));
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+void ui_status_set_night_mode(bool on)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_night_mode != on) {
+        s_night_mode = on;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+bool ui_status_night_mode(void)
+{
+    return s_night_mode;
 }
 
 void ui_status_set_partial_text(const char *text)

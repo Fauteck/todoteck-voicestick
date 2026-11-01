@@ -516,7 +516,7 @@ static void render_weather_locked(void)
     ui_status_icons_show(&s_tecki, false);
     ui_weather_render_locked(s_wpage, true);
     /* Eine Warnung, die so noch nicht zu sehen war: einmal vibrieren. */
-    if (ui_weather_take_new_warning_locked()) {
+    if (ui_weather_take_new_warning_locked() && !ui_status_night_mode()) {
         voice_board_haptic_pattern(2, 120, 120);
     }
 }
