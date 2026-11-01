@@ -61,6 +61,14 @@ static const char *TAG = "watch206_board";
 #define TOUCH_POLL_MS 20
 /* Laenger als das liegt kein Finger auf einem Antippen -- dann ist es der Aermel. */
 #define TOUCH_MAX_TAP_MS 800
+/*
+ * Langer Druck (0.4.4): ein Finger, ohne zu wischen, mindestens so lange --
+ * und hoechstens TOUCH_MAX_LONG_MS, sonst bleibt es beim Aermel. Ausgewertet
+ * beim Abheben wie alles andere: Ein Aermel, der liegen bleibt, loest auch
+ * so nichts aus. Kuerzer bleibt es ein Tippen.
+ */
+#define TOUCH_LONG_PRESS_MS 600
+#define TOUCH_MAX_LONG_MS 2000
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_axp_dev;
@@ -450,6 +458,18 @@ static void touch_task(void *arg)
             last_event_us = up_us;
             voice_board_touch_event_t ev = { .gesture = VOICE_BOARD_PALM, .x = x0, .y = y0 };
             ESP_LOGI(TAG, "Touch: Hand aufs Display (%d Punkte)", max_points);
+            if (s_touch_cb) {
+                s_touch_cb(&ev);
+            }
+        } else if (seen && max_points == 1 && abs(x1 - x0) < TOUCH_SWIPE_PX &&
+                   abs(y1 - y0) < TOUCH_SWIPE_PX &&
+                   up_us - down_us >= TOUCH_LONG_PRESS_MS * 1000LL &&
+                   up_us - down_us <= TOUCH_MAX_LONG_MS * 1000LL &&
+                   up_us - last_event_us >= TOUCH_DEBOUNCE_US) {
+            last_event_us = up_us;
+            voice_board_touch_event_t ev = { .gesture = VOICE_BOARD_LONG_PRESS, .x = x0, .y = y0 };
+            ESP_LOGI(TAG, "Touch: langer Druck bei (%d,%d), %lld ms", x0, y0,
+                     (long long)((up_us - down_us) / 1000));
             if (s_touch_cb) {
                 s_touch_cb(&ev);
             }

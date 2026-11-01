@@ -1079,6 +1079,15 @@ esp_err_t voice_ble_send_action(void)
     return send_state_json("{\"event\":\"action\"}");
 }
 
+esp_err_t voice_ble_send_face_layout(const char *face)
+{
+    char json[64];
+    snprintf(json, sizeof(json), "{\"event\":\"face_layout\",\"face\":\"%.16s\"}",
+             face ? face : "");
+    ESP_LOGI(TAG, "face_layout %s", face ? face : "");
+    return send_state_json(json);
+}
+
 esp_err_t voice_ble_send_glance_request(void)
 {
     return send_state_json("{\"event\":\"glance_request\"}");

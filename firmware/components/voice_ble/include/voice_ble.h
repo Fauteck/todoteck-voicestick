@@ -81,6 +81,11 @@ esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index);
 esp_err_t voice_ble_send_glance_request(void);
 /* Aktionstaste der Uhr (PWR lang): was sie tut, legt die Bruecke fest. */
 esp_err_t voice_ble_send_action(void);
+/*
+ * Zifferblatt-Layout an der Uhr gewaehlt ("info", "minimal", "large"): die
+ * Bruecke speichert es beim Server und schickt `watch_settings` neu (0.4.4).
+ */
+esp_err_t voice_ble_send_face_layout(const char *face);
 /* "Abbrechen" in der Transkript-Szene der Uhr: die Bruecke fuehrt den Satz nicht aus. */
 esp_err_t voice_ble_send_cancel_transcript(void);
 /*

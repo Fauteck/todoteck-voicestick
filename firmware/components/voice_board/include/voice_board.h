@@ -39,6 +39,8 @@ typedef enum {
     VOICE_BOARD_SWIPE_DOWN,
     /* Flache Hand auf dem Schirm: alles still. */
     VOICE_BOARD_PALM,
+    /* Ein Finger 0,6 bis 2 s ohne Wischen (0.4.4): auf dem Zifferblatt die Layout-Auswahl. */
+    VOICE_BOARD_LONG_PRESS,
 } voice_board_gesture_t;
 
 typedef struct {
