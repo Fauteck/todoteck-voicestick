@@ -1662,7 +1662,9 @@ static void handle_palm(void)
  *   rechts            Verlauf          aelter                 vorige Karte; von   --
  *                                                             Heute: Zifferblatt
  *   Tippen            Verlauf oeffnen  Ja/Nein; Kurzform <->  Zeile abhaken /     Kachel
- *                                      ganz; sonst aelter     schalten; Rueckg.
+ *                                      ganz; sonst aelter     schalten; Heute:
+ *                                                             markieren, dann
+ *                                                             "OK"; Rueckg.
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
  *
  * Sonderfaelle: Ein gedimmter Schirm wird von der ersten Beruehrung nur
@@ -1685,6 +1687,10 @@ static void handle_palm(void)
  *     die Antwort kam hinter der Karte an.
  *   - Tippen auf eine Antwort in Kurzform zeigt die ganze (und zurueck).
  *     Ohne Kurzform bleibt Tippen, was es war: die Blaettertaste.
+ *   - Karte Heute, Tippen (11/2026): markiert die Zeile nur; abgehakt wird
+ *     erst mit "OK - erledigt" in der Zeile. Ein Fehltipp am Handgelenk
+ *     hakte vorher sofort ab. Einkauf und Zuhause bleiben beim direkten
+ *     Tippen (Wunsch des Nutzers).
  *   - Kontrollzentrum und Karten oeffnen nicht in der Transkript-Szene:
  *     Sie verdeckten genau die zwei Sekunden, in denen "Abbrechen" gilt.
  */
@@ -1763,6 +1769,9 @@ static void handle_touch(const app_event_t *event)
         } else if (action == UI_CARDS_CLOSE) {
             /* Von Heute nach rechts oder nach unten: zurueck aufs Zifferblatt. */
             ui_status_show_home();
+        } else if (action == UI_CARDS_SELECT) {
+            /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
+            voice_board_haptic_pattern(1, 20, 0);
         } else if (action == UI_CARDS_END) {
             /* Rechts von Zuhause kommt nichts mehr: ein kurzer Stoss sagt das. */
             voice_board_haptic_pattern(1, 15, 0);

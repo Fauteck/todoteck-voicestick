@@ -1094,31 +1094,123 @@ static int local_hour(void)
 #endif
 
 /*
- * Der Termin als eine Zeile: "Zahnarzt in 25 min", "Jetzt: Zahnarzt",
- * sonst "Zahnarzt 09:30". Leer, wenn keiner ansteht oder er schon eine halbe
- * Stunde laeuft.
+ * Der Termin als eine Zeile, Tag und Zeit vorn, der Titel dahinter:
+ * "Jetzt: Zahnarzt", "in 25 min Zahnarzt", "Heute 09:30 Zahnarzt",
+ * "Morgen 09:00 Zahnarzt", "Mo 09:00 Zahnarzt", ab einer Woche "12.11.
+ * 09:00 Zahnarzt". Ganztaegig (Beginn 00:00 Ortszeit) ohne Uhrzeit:
+ * "Heute Urlaub", "Morgen Urlaub", "Mo Urlaub" -- und "Heute" steht dann
+ * den ganzen Tag, nicht nur bis eine halbe Stunde nach Mitternacht.
+ *
+ * Bis 11/2026 stand nur "Sugarbabes 09:00" da; um 10:36 war damit der
+ * Termin morgen gemeint, und das las sich wie einer, den man verpasst hat.
+ * Der Tag steht deshalb immer dabei, und zwar vorn: Ein langer Titel wird
+ * hinten mit "..." gekuerzt (das Label kuerzt ohnehin am Ende), Tag und
+ * Uhrzeit nie. Gerechnet wird in Ortszeit ueber den Versatz, den die
+ * Bruecke mit `time` schickt.
+ *
+ * Leer, wenn keiner ansteht oder er schon eine halbe Stunde laeuft.
  */
+#define EVENT_LINE_CHARS 40
+
+/* Ortstag als fortlaufende Zahl (Tage seit 1970 in Ortszeit). */
+static int64_t local_day(int64_t epoch_utc)
+{
+    const int64_t local = epoch_utc + (int64_t)s_clock_offset_min * 60;
+    return local >= 0 ? local / 86400 : (local - 86399) / 86400;
+}
+
+/* `prefix` + " " + Titel, der Titel UTF-8-sauber auf den Rest der Zeile gekuerzt. */
+static void join_event_line(char *out, size_t size, const char *prefix)
+{
+    size_t prefix_chars = strlen(prefix);  /* Praefixe sind reines ASCII */
+    size_t budget = EVENT_LINE_CHARS > prefix_chars + 1 ? EVENT_LINE_CHARS - prefix_chars - 1 : 4;
+    size_t title_chars = 0;
+    for (const unsigned char *p = (const unsigned char *)s_event_title; *p; p++) {
+        if ((*p & 0xC0) != 0x80) {
+            title_chars++;
+        }
+    }
+    char title[UI_STATUS_FACE_LEN + 4];
+    size_t n = 0;
+    if (title_chars <= budget) {
+        snprintf(title, sizeof(title), "%s", s_event_title);
+    } else {
+        /* Platz fuer "..." lassen und nur an Zeichengrenzen schneiden. */
+        size_t keep = budget > 3 ? budget - 3 : 1;
+        size_t chars = 0;
+        const char *src = s_event_title;
+        while (src[n] != '\0') {
+            if (((unsigned char)src[n] & 0xC0) != 0x80) {
+                if (chars == keep) {
+                    break;
+                }
+                chars++;
+            }
+            n++;
+        }
+        while (n > 0 && src[n - 1] == ' ') {
+            n--;
+        }
+        if (n > sizeof(title) - 4) {
+            n = sizeof(title) - 4;
+        }
+        memcpy(title, src, n);
+        memcpy(title + n, "...", 4);
+    }
+    snprintf(out, size, "%s %s", prefix, title);
+}
+
 static void format_event(char *out, size_t size)
 {
+    static const char *const WEEKDAYS[7] = { "So", "Mo", "Di", "Mi", "Do", "Fr", "Sa" };
     out[0] = '\0';
     if (!s_event_title[0] || s_event_start <= 0 || !s_clock_valid) {
         return;
     }
     const int64_t now = (int64_t)time(NULL);
     const int64_t delta_min = (s_event_start - now) / 60;
-    if (delta_min < -30) {
+    const time_t start = (time_t)s_event_start + (time_t)s_clock_offset_min * 60;
+    struct tm parts;
+    gmtime_r(&start, &parts);
+    const bool all_day = parts.tm_hour == 0 && parts.tm_min == 0;
+    const int64_t days = local_day(s_event_start) - local_day(now);
+
+    char prefix[32];
+    if (all_day) {
+        /* Ganztaegig: Heute gilt bis Mitternacht, vorbei ist erst gestern. */
+        if (days < 0) {
+            return;
+        }
+    } else if (delta_min < -30) {
+        return;
+    } else if (delta_min <= 0) {
+        snprintf(out, size, "Jetzt: %.30s", s_event_title);
+        return;
+    } else if (delta_min < 60) {
+        snprintf(prefix, sizeof(prefix), "in %u min", (unsigned)delta_min % 60u);
+        join_event_line(out, size, prefix);
         return;
     }
-    if (delta_min <= 0) {
-        snprintf(out, size, "Jetzt: %.30s", s_event_title);
-    } else if (delta_min < 60) {
-        snprintf(out, size, "%.28s in %d min", s_event_title, (int)delta_min);
+
+    char day[16];
+    if (days == 0) {
+        snprintf(day, sizeof(day), "Heute");
+    } else if (days == 1) {
+        snprintf(day, sizeof(day), "Morgen");
+    } else if (days < 7) {
+        /* Innerhalb einer Woche ist der Wochentag eindeutig. */
+        snprintf(day, sizeof(day), "%s", WEEKDAYS[parts.tm_wday % 7]);
     } else {
-        const time_t start = (time_t)s_event_start + (time_t)s_clock_offset_min * 60;
-        struct tm parts;
-        gmtime_r(&start, &parts);
-        snprintf(out, size, "%.30s %02d:%02d", s_event_title, parts.tm_hour, parts.tm_min);
+        snprintf(day, sizeof(day), "%02u.%02u.", (unsigned)parts.tm_mday % 32u,
+                 (unsigned)(parts.tm_mon + 1) % 13u);
     }
+    if (all_day) {
+        snprintf(prefix, sizeof(prefix), "%s", day);
+    } else {
+        snprintf(prefix, sizeof(prefix), "%s %02u:%02u", day, (unsigned)parts.tm_hour % 24u,
+                 (unsigned)parts.tm_min % 60u);
+    }
+    join_event_line(out, size, prefix);
 }
 
 /*
@@ -1302,7 +1394,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_obj_set_style_text_font(s_clock_label,
                                    clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
         lv_obj_set_width(s_clock_label, clock_only ? CONTENT_W : plan.width);
-        char event_line[UI_STATUS_FACE_LEN + 12];
+        char event_line[UI_STATUS_FACE_LEN + 40];
         format_event(event_line, sizeof(event_line));
         const bool face_info = clock_only && (s_face_count > 0 || event_line[0]) &&
                                s_face_label[0] != NULL;

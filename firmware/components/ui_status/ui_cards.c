@@ -115,6 +115,19 @@ static const lv_font_t *const LEVEL_ROW_FONT[3] = {
 #define UNDO_W 240
 #define UNDO_H 56
 #define UNDO_MS 5000
+/*
+ * Bestaetigung auf der Karte Heute: Das erste Tippen markiert die Zeile,
+ * erst "OK - erledigt" hakt ab. Der Chip sitzt rechts **in** der markierten
+ * Zeile, nicht unten wie "Rueckgaengig": Unten laege er ueber der letzten
+ * Zeile, und wer nach der Markierung eine untere Zeile antippen wollte,
+ * bestaetigte stattdessen die markierte -- genau der Fehlgriff, den die
+ * Bestaetigung verhindern soll. In der Zeile verdeckt er nur die eigene
+ * Zusatzangabe (Uhrzeit), ist so hoch wie die Zeile (also >= 48 px), und
+ * seine Mitte liegt bei x 319 weit weg von den Eckrundungen. 150 px fassen
+ * "OK - erledigt" in der 20er (rund 116 px) mit Rand.
+ */
+#define OK_W 150
+#define OK_MS 5000
 /* Teckis Flaeche auf der leeren Karte. */
 #define EMPTY_TECKI_BOX 96
 #define EMPTY_TECKI_Y 110
@@ -131,6 +144,8 @@ static lv_obj_t *s_row_text[ROWS_MAX];
 static lv_obj_t *s_row_aux[ROWS_MAX];
 static lv_obj_t *s_undo;
 static lv_timer_t *s_undo_timer;
+static lv_obj_t *s_ok;
+static lv_timer_t *s_sel_timer;
 static bool s_visible;
 static ui_card_kind_t s_kind;
 static uint8_t s_page_index;
@@ -143,6 +158,13 @@ static struct {
     uint8_t index;
     bool prev_done;
 } s_last;
+
+/* Markierte Zeile der Karte Heute, die auf "OK" wartet (Index in der Liste). */
+static struct {
+    bool active;
+    uint16_t rev;
+    uint8_t index;
+} s_sel;
 
 static uint8_t rows_per_page(void)
 {
@@ -229,6 +251,23 @@ static void create_locked(void)
     lv_obj_set_style_text_color(undo_label, lv_color_hex(0x000000), 0);
     lv_obj_center(undo_label);
     lv_obj_add_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
+
+    /* OK-Chip: gruen mit schwarzer Schrift, Lage setzt render_locked(). */
+    s_ok = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_ok);
+    lv_obj_remove_flag(s_ok, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(s_ok, 16, 0);
+    lv_obj_set_style_bg_opa(s_ok, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_ok, lv_color_hex(0x2ecc71), 0);
+    lv_obj_t *ok_label = lv_label_create(s_ok);
+    char ok_text[24];
+    /* Die Schriften haben keinen Halbgeviertstrich; die Kopie macht "-" daraus. */
+    ui_status_copy_display_text(ok_text, "OK – erledigt", sizeof(ok_text));
+    lv_label_set_text(ok_label, ok_text);
+    lv_obj_set_style_text_font(ok_label, &todoteck_watch_font_20, 0);
+    lv_obj_set_style_text_color(ok_label, lv_color_hex(0x000000), 0);
+    lv_obj_center(ok_label);
+    lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
 }
 
 static uint8_t page_count(const card_list_t *list)
@@ -246,6 +285,34 @@ static void hide_undo_locked(void)
     }
     if (s_undo) {
         lv_obj_add_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Markierung verwerfen; nichts wird gesendet. Zeichnet nicht neu. */
+static bool clear_selection_locked(void)
+{
+    const bool was_active = s_sel.active;
+    s_sel.active = false;
+    if (s_sel_timer) {
+        lv_timer_delete(s_sel_timer);
+        s_sel_timer = NULL;
+    }
+    if (s_ok) {
+        lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+    }
+    return was_active;
+}
+
+static void render_locked(void);
+
+static void sel_expired_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    /* Einmaliger Zeitgeber: LVGL loescht ihn nach diesem Aufruf selbst. */
+    s_sel_timer = NULL;
+    clear_selection_locked();
+    if (s_visible) {
+        render_locked();
     }
 }
 
@@ -286,6 +353,7 @@ static void render_locked(void)
     }
 
     const int32_t pitch = (ROWS_BOTTOM - ROWS_TOP) / rows;
+    bool ok_shown = false;
     for (int i = 0; i < ROWS_MAX; i++) {
         const int index = s_page_index * rows + i;
         if (i >= rows || index >= list->count) {
@@ -293,8 +361,19 @@ static void render_locked(void)
             continue;
         }
         const card_item_t *item = &list->items[index];
+        const bool selected = s_sel.active && s_kind == UI_CARD_TODAY && s_sel.index == index;
         lv_obj_set_size(s_row[i], CONTENT_W, pitch - ROW_GAP);
         lv_obj_align(s_row[i], LV_ALIGN_TOP_LEFT, 0, ROWS_TOP + i * pitch);
+        /* Markiert: hellere Flaeche und gruener Rand, passend zum OK-Chip. */
+        lv_obj_set_style_bg_color(s_row[i], lv_color_hex(selected ? 0x2a3b4f : 0x1b2430), 0);
+        lv_obj_set_style_border_width(s_row[i], selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(s_row[i], lv_color_hex(0x2ecc71), 0);
+        if (selected) {
+            lv_obj_set_size(s_ok, OK_W, pitch - ROW_GAP);
+            lv_obj_align(s_ok, LV_ALIGN_TOP_LEFT, CONTENT_W - OK_W, ROWS_TOP + i * pitch);
+            lv_obj_remove_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+            ok_shown = true;
+        }
 
         const bool striped = (item->colour & CARD_COLOUR_SET) != 0;
         const int32_t text_x = striped ? 16 + STRIPE_W + 8 : 16;
@@ -310,7 +389,7 @@ static void render_locked(void)
         }
 
         lv_obj_set_style_text_font(s_row_text[i], row_font, 0);
-        lv_obj_set_width(s_row_text[i], CONTENT_W - 94 - text_x);
+        lv_obj_set_width(s_row_text[i], (selected ? CONTENT_W - OK_W - 8 : CONTENT_W - 94) - text_x);
         lv_obj_align(s_row_text[i], LV_ALIGN_LEFT_MID, text_x, 0);
         lv_label_set_text(s_row_text[i], item->text);
         lv_obj_set_style_text_decor(s_row_text[i],
@@ -332,11 +411,23 @@ static void render_locked(void)
             lv_label_set_text(s_row_aux[i], item->aux);
             lv_obj_set_style_text_color(s_row_aux[i], lv_color_hex(0x9aa3ad), 0);
         }
+        /* Unter dem OK-Chip laege die Zusatzangabe nur verdeckt. */
+        if (selected) {
+            lv_obj_add_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
+        }
         lv_obj_remove_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
     }
-    /* Der Chip liegt ueber den Zeilen, also nach ihnen nach vorn. */
+    if (!ok_shown) {
+        lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* Die Chips liegen ueber den Zeilen, also nach ihnen nach vorn. */
     if (s_last.armed) {
         lv_obj_move_foreground(s_undo);
+    }
+    if (ok_shown) {
+        lv_obj_move_foreground(s_ok);
     }
 }
 
@@ -354,6 +445,33 @@ static int32_t hit_distance(lv_obj_t *obj, int16_t x, int16_t y)
     }
     const int32_t cy = (area.y1 + area.y2) / 2;
     return y > cy ? y - cy : cy - y;
+}
+
+/*
+ * Zeile `index` der sichtbaren Karte abhaken bzw. umschalten -- so, wie es
+ * vor der Bestaetigung jedes Tippen tat: Die Zeile zeigt es sofort, und
+ * fuenf Sekunden steht "Rueckgaengig" (ein neues Abhaken startet sie neu).
+ */
+static ui_cards_action_t check_off_locked(card_list_t *list, int index, ui_cards_hit_t *hit)
+{
+    card_item_t *item = &list->items[index];
+    s_last.kind = s_kind;
+    s_last.rev = list->rev;
+    s_last.index = (uint8_t)index;
+    s_last.prev_done = item->done;
+    item->done = s_kind == UI_CARD_SWITCHES ? !item->done : true;
+    if (hit) {
+        hit->kind = s_kind;
+        hit->rev = list->rev;
+        hit->index = (uint8_t)index;
+    }
+    hide_undo_locked();
+    s_last.armed = true;
+    s_undo_timer = lv_timer_create(undo_expired_cb, UNDO_MS, NULL);
+    lv_timer_set_repeat_count(s_undo_timer, 1);
+    lv_obj_remove_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
+    render_locked();
+    return UI_CARDS_ITEM;
 }
 #endif /* CONFIG_VOICE_BOARD_WATCH206 */
 
@@ -381,6 +499,16 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part)
     if (part == 0) {
         memset(&s_lists[kind], 0, sizeof(s_lists[kind]));
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    /*
+     * Neue Liste waehrend einer Markierung: Hinter dem Index steht jetzt
+     * vielleicht eine andere Aufgabe -- ein "OK" bestaetigte die falsche.
+     * Das Neuzeichnen kommt mit ui_cards_commit().
+     */
+    if (kind == UI_CARD_TODAY && s_sel.active && s_sel.rev != rev) {
+        clear_selection_locked();
+    }
+#endif
     s_lists[kind].rev = rev;
     s_lists[kind].received = true;
     ui_status_unlock();
@@ -426,6 +554,7 @@ void ui_cards_show(ui_card_kind_t kind)
     ui_status_lock();
     create_locked();
     hide_undo_locked();
+    clear_selection_locked();
     s_kind = kind;
     s_page_index = 0;
     s_visible = true;
@@ -445,6 +574,7 @@ void ui_cards_hide(void)
     ui_status_lock();
     s_visible = false;
     hide_undo_locked();
+    clear_selection_locked();
     if (s_root) {
         lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
@@ -469,7 +599,17 @@ bool ui_cards_visible(void)
  *   links / rechts   naechste / vorige Karte (Rueckgaengig-Chip verschwindet)
  *   nach oben        naechste Seite, nach der letzten wieder die erste
  *   nach unten       eine Ebene zurueck: Karten zu
- *   Tippen           Chip "Rueckgaengig" vor Zeile; Zeile abhaken/schalten
+ *   Tippen           Chip "Rueckgaengig" vor Zeile; Zeile abhaken/schalten --
+ *                    auf Heute erst markieren, dann "OK - erledigt" (11/2026)
+ *
+ * Heute fragt nach: Ein Tippen auf eine Zeile markiert sie nur, erst der
+ * OK-Chip in der Zeile hakt ab. Ein Fehltipp am Handgelenk -- beim Wischen,
+ * am Aermel -- hakte vorher sofort eine Aufgabe ab (Wunsch des Nutzers).
+ * Eine andere Zeile antippen markiert diese; daneben tippen, wischen, die
+ * Karte wechseln oder schliessen, fuenf Sekunden warten oder eine neue Liste
+ * der Bruecke verwerfen die Markierung, ohne etwas zu senden. Einkauf und
+ * Zuhause bleiben beim direkten Tippen: Dort ist der Fehlgriff harmlos und
+ * mit "Rueckgaengig" schnell zurueck.
  *
  * Bis 10/2026 blaetterte "nach unten" erst zurueck und schloss erst auf der
  * ersten Seite. Ueberall sonst heisst nach unten "eine Ebene zurueck", und
@@ -487,6 +627,10 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
         return UI_CARDS_NONE;
     }
     card_list_t *list = &s_lists[s_kind];
+    /* Jede Geste ausser Tippen verwirft die Markierung. */
+    if ((voice_board_gesture_t)gesture != VOICE_BOARD_TAP && clear_selection_locked()) {
+        render_locked();
+    }
     switch ((voice_board_gesture_t)gesture) {
     /*
      * Die Karten liegen rechts neben dem Zifferblatt in einer Reihe:
@@ -523,6 +667,40 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
         action = UI_CARDS_CLOSE;
         break;
     case VOICE_BOARD_TAP: {
+        /*
+         * Mit Toleranz trifft ein Finger zwischen zwei Zeilen beide; es
+         * zaehlt die, deren Mitte naeher liegt.
+         */
+        const uint8_t rows = rows_per_page();
+        int best = -1;
+        int32_t best_distance = 0;
+        for (int i = 0; i < rows && i < ROWS_MAX; i++) {
+            const int32_t distance = hit_distance(s_row[i], x, y);
+            if (distance >= 0 && (best < 0 || distance < best_distance)) {
+                best = i;
+                best_distance = distance;
+            }
+        }
+        if (s_sel.active) {
+            /*
+             * OK getroffen: Der Chip liegt in der markierten Zeile und hat
+             * deren Mitte; eine Nachbarzeile gewinnt nur, wenn ihre Mitte
+             * naeher liegt (Tippen im Zwischenraum).
+             */
+            const int32_t ok_distance = hit_distance(s_ok, x, y);
+            if (ok_distance >= 0 && (best < 0 || ok_distance <= best_distance)) {
+                const int index = s_sel.index;
+                const bool valid = s_kind == UI_CARD_TODAY && list->rev == s_sel.rev &&
+                                   index < list->count && !list->items[index].done;
+                clear_selection_locked();
+                if (valid) {
+                    action = check_off_locked(list, index, hit);
+                } else {
+                    render_locked();
+                }
+                break;
+            }
+        }
         if (s_last.armed && hit_distance(s_undo, x, y) >= 0) {
             /*
              * Rueckgaengig: Die Zeile zeigt sofort wieder den Stand vorher --
@@ -544,54 +722,44 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
             render_locked();
             break;
         }
-        /*
-         * Mit Toleranz trifft ein Finger zwischen zwei Zeilen beide; es
-         * zaehlt die, deren Mitte naeher liegt.
-         */
-        const uint8_t rows = rows_per_page();
-        int best = -1;
-        int32_t best_distance = 0;
-        for (int i = 0; i < rows && i < ROWS_MAX; i++) {
-            const int32_t distance = hit_distance(s_row[i], x, y);
-            if (distance >= 0 && (best < 0 || distance < best_distance)) {
-                best = i;
-                best_distance = distance;
-            }
-        }
-        if (best < 0) {
-            break;
-        }
-        const int index = s_page_index * rows + best;
-        if (index >= list->count) {
-            break;
-        }
-        card_item_t *item = &list->items[index];
+        const int index = best < 0 ? -1 : s_page_index * rows + best;
         /*
          * Abhaken geht nur einmal -- ein zweites Tippen auf dieselbe
          * Zeile schickte sonst zweimal "erledigt". Schalter duerfen hin
          * und her.
          */
-        if (item->done && s_kind != UI_CARD_SWITCHES) {
+        if (index < 0 || index >= list->count ||
+            (list->items[index].done && s_kind != UI_CARD_SWITCHES)) {
+            /* Daneben getippt: eine Markierung verfaellt, gesendet wird nichts. */
+            if (clear_selection_locked()) {
+                render_locked();
+            }
             break;
         }
-        s_last.kind = s_kind;
-        s_last.rev = list->rev;
-        s_last.index = (uint8_t)index;
-        s_last.prev_done = item->done;
-        item->done = s_kind == UI_CARD_SWITCHES ? !item->done : true;
-        if (hit) {
-            hit->kind = s_kind;
-            hit->rev = list->rev;
-            hit->index = (uint8_t)index;
+        if (s_kind == UI_CARD_TODAY) {
+            /*
+             * Heute: nur markieren (oder die Markierung auf diese Zeile
+             * legen). Fuenf Sekunden wartet der OK-Chip, jedes neue Tippen
+             * auf eine Zeile startet sie neu. Ein noch stehendes
+             * "Rueckgaengig" weicht -- sonst laegen zwei Chips uebereinander.
+             */
+            clear_selection_locked();
+            hide_undo_locked();
+            s_sel.active = true;
+            s_sel.rev = list->rev;
+            s_sel.index = (uint8_t)index;
+            s_sel_timer = lv_timer_create(sel_expired_cb, OK_MS, NULL);
+            lv_timer_set_repeat_count(s_sel_timer, 1);
+            if (hit) {
+                hit->kind = s_kind;
+                hit->rev = list->rev;
+                hit->index = (uint8_t)index;
+            }
+            action = UI_CARDS_SELECT;
+            render_locked();
+            break;
         }
-        action = UI_CARDS_ITEM;
-        /* Fuenf Sekunden "Rueckgaengig" -- ein neues Tippen startet sie neu. */
-        hide_undo_locked();
-        s_last.armed = true;
-        s_undo_timer = lv_timer_create(undo_expired_cb, UNDO_MS, NULL);
-        lv_timer_set_repeat_count(s_undo_timer, 1);
-        lv_obj_remove_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
-        render_locked();
+        action = check_off_locked(list, index, hit);
         break;
     }
     default:

@@ -193,9 +193,9 @@ Watch-only on top of that:
 | Haptics with every tone | One short pulse to start, two for an answer, one long for an error, one very short for a discard — also when the tone is skipped because the capture path holds the I2S lines |
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
 | Gestures | One rule set for every scene — see the gesture table below |
-| Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
-| Cards: Today, Shopping, Home | They sit in a row to the right of the watch face: swipe left from the face for Today, again for Shopping and Home; swipe right goes back, from Today to the face. Swipe up from the face opens Today too; up pages, down goes back to the face. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
-| Undo | For 5 s after a card tap a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` and restores the row |
+| Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event with its day always in front, in local time: "in 25 min …" within the hour, otherwise "Heute 09:00 …", "Morgen 09:00 …", "Mo 09:00 …" (a date from a week out); all-day events (starting 00:00) without a time. Long titles end in "...", day and time are never cut; ten minutes before it the watch vibrates three times |
+| Cards: Today, Shopping, Home | They sit in a row to the right of the watch face: swipe left from the face for Today, again for Shopping and Home; swipe right goes back, from Today to the face. Swipe up from the face opens Today too; up pages, down goes back to the face. A tap checks off a shopping item or toggles a Home Assistant switch; on Today a tap only selects the row (highlighted, short buzz) and the green "OK – erledigt" chip at its right end checks it off — another row moves the selection, a tap elsewhere, a swipe, closing, a new list from the bridge or 5 s without OK drop it and send nothing. Either way the bridge carries it out (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
+| Undo | For 5 s after a row is checked off or toggled a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` and restores the row |
 | Transcript first | The bridge shows what it understood (`transcript`) for 2 s before acting; "Abbrechen", a palm or a short press on the talk button stops it (`cancel_transcript`) |
 | Short answers | An answer longer than two lines shows its first sentence (at most ~90 characters) and "Tippen für mehr"; a tap shows the whole answer. Open yes/no questions are always shown in full. The history behaves the same and shows its position as dots |
 | Settings from the app | `watch_settings`: font size in three steps (answer, question line, card rows, transcript), how long until the watch returns to the face (an unread answer stays at least 2 min), which control-centre tiles show and in which order |
@@ -221,7 +221,7 @@ the left brings in what lies to the right (the same table heads
 | Swipe up | cards | cards | next page | closes |
 | Swipe left | Today | newer; from the newest back to the watch face | next card; nothing after Home | — |
 | Swipe right | into the history | older | previous card; from Today back to the watch face | — |
-| Tap | opens the history | yes/no; short ⇄ full answer; otherwise one older | check off / toggle; "Rückgängig" | tile |
+| Tap | opens the history | yes/no; short ⇄ full answer; otherwise one older | check off / toggle; on Today first select, then "OK – erledigt"; "Rückgängig" | tile |
 | Palm on the screen | everything quiet: recording discarded, layers closed, screen dark | | | |
 
 A dimmed screen is only woken by the first touch; during a recording the
