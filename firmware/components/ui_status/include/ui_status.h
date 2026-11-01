@@ -81,6 +81,15 @@ void ui_status_history_add_card(const char *line, uint8_t card_kind, uint16_t ca
 bool ui_status_history_chip_at(int16_t x, int16_t y, ui_history_chip_hit_t *out);
 /* Nach einem gesendeten Rueckgaengig: der gezeigte Eintrag ist nicht noch einmal ruecknehmbar. */
 void ui_status_history_mark_undone(void);
+/*
+ * Verlauf in den NVS, nur die Uhr: 30 s nach einer Aenderung meldet sich der
+ * Zeitgeber ueber diesen Ruf (aus dem esp_timer-Task, kleiner Stack) statt
+ * selbst zu schreiben. Der Abnehmer ruft ui_status_history_save() aus seinem
+ * eigenen Task; ohne Abnehmer schreibt der Zeitgeber selbst.
+ */
+typedef void (*ui_status_history_save_cb_t)(void);
+void ui_status_set_history_save_cb(ui_status_history_save_cb_t cb);
+void ui_status_history_save(void);
 void ui_status_set_idle_dimmed(bool dimmed);
 /* Einen Schritt zurueck durch die letzten Fragen und Antworten. */
 void ui_status_browse_history(void);

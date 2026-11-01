@@ -13,6 +13,7 @@
 #include "nvs.h"
 #include "driver/gpio.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -372,6 +373,8 @@ typedef enum {
     APP_EVENT_NIGHT_PEEK_END,
     /* Die Bruecke will das Akku-Protokoll ab `epoch` (Uhr). */
     APP_EVENT_BATTERY_LOG_REQUEST,
+    /* Verlauf in den NVS schreiben (ui_status meldet, der Ereignis-Task schreibt). */
+    APP_EVENT_HISTORY_SAVE,
     /* 15 Sekunden gedimmt vorbei: Schirm aus (Uhr). */
     APP_EVENT_DISPLAY_OFF,
     /* Drei Sekunden ohne Uebertragung der Bruecke: Verbindung wieder langsam. */
@@ -519,16 +522,17 @@ static void apply_light_sleep(void)
  *                  eine ESP_PM_APB_FREQ_MAX-Sperre. Das ist die Stufe, auf
  *                  der LVGL zeichnet und der Finger scrollt.
  *   Maximum        nur mit s_cpu_freq_lock (ESP_PM_CPU_FREQ_MAX) beim
- *                  Aufnehmen (Opus) und bei OTA. Auf der Uhr sind das 240 MHz
- *                  (sdkconfig.defaults.watch206), auf dem StickS3 die 160 der
- *                  Vorgabe.
+ *                  Aufnehmen (Opus) und bei OTA. Das sind 160 MHz, auf beiden
+ *                  Geraeten (CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ). Die Uhr lief in
+ *                  0.4.1 mit 240 und startete damit nicht mehr -- siehe
+ *                  sdkconfig.defaults.watch206; seit 0.4.2 wieder 160.
  *
  * Warum nicht "beim Touch kurz 160": esp_pm kennt keine Zwischenstufe. Eine
  * Sperre hebt entweder auf APB-Maximum (80) oder auf das konfigurierte
- * Maximum; 160 waere nur zu haben, indem das Maximum selbst 160 wird -- dann
- * aber auch fuers Aufnehmen. Sollte Scrollen bei 80 MHz ruckeln, ist das die
- * Stellschraube: CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 statt 240 in
- * sdkconfig.defaults.watch206, nicht eine weitere Sperre.
+ * Maximum; eine dritte Stufe waere nur zu haben, indem das Maximum selbst
+ * sie wird -- dann aber auch fuers Aufnehmen. Sollte Scrollen bei 80 MHz
+ * ruckeln, ist das Maximum in sdkconfig.defaults.watch206 die Stellschraube,
+ * nicht eine weitere Sperre.
  */
 static esp_err_t init_power_management(void)
 {
@@ -1225,6 +1229,18 @@ static void queue_transcript_event(const char *text, uint32_t cancel_ms)
         ESP_LOGW(TAG, "drop transcript: app queue full");
     }
 }
+
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Aus dem esp_timer-Task (ui_status, 30 s nach einer Verlaufs-Aenderung):
+ * nur einreihen. Geschrieben wird im Ereignis-Task, wie das Akku-Protokoll
+ * (battery_log_save) -- nicht auf dem 3,5-KB-Stack des Zeitgebers.
+ */
+static void history_save_cb(void)
+{
+    queue_app_event(APP_EVENT_HISTORY_SAVE);
+}
+#endif
 
 #if WRIST_WAKE_ENABLED
 /*
@@ -2681,6 +2697,11 @@ static void app_event_task(void *arg)
             update_night_mode();
 #endif
             break;
+        case APP_EVENT_HISTORY_SAVE:
+#if CONFIG_VOICE_BOARD_WATCH206
+            ui_status_history_save();
+#endif
+            break;
         case APP_EVENT_BATTERY_LOG_REQUEST:
 #if CONFIG_VOICE_BOARD_WATCH206
             send_battery_log(event.epoch);
@@ -3255,10 +3276,38 @@ static void update_battery_status(void)
     }
 }
 
+/*
+ * Klartext zum Neustart-Grund fuers Boot-Log. Nach einem OTA-Rueckfall ist
+ * das die einzige Spur der abgestuerzten Fassung: Die alte Fassung startet
+ * und nennt hier, woran die neue gescheitert ist (Panic, Brownout, Watchdog).
+ */
+static const char *reset_reason_text(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:    return "Einschalten";
+    case ESP_RST_EXT:        return "externer Reset";
+    case ESP_RST_SW:         return "Software-Neustart";
+    case ESP_RST_PANIC:      return "Panic (Absturz)";
+    case ESP_RST_INT_WDT:    return "Interrupt-Watchdog";
+    case ESP_RST_TASK_WDT:   return "Task-Watchdog";
+    case ESP_RST_WDT:        return "Watchdog";
+    case ESP_RST_DEEPSLEEP:  return "Tiefschlaf";
+    case ESP_RST_BROWNOUT:   return "Brownout (Spannung)";
+    case ESP_RST_SDIO:       return "SDIO";
+    case ESP_RST_USB:        return "USB";
+    case ESP_RST_JTAG:       return "JTAG";
+    case ESP_RST_EFUSE:      return "eFuse-Fehler";
+    case ESP_RST_PWR_GLITCH: return "Spannungseinbruch";
+    case ESP_RST_CPU_LOCKUP: return "CPU blockiert";
+    default:                 return "unbekannt";
+    }
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "boot reset_reason=%d wakeup_cause=%d ext1_status=0x%llx",
-             esp_reset_reason(), esp_sleep_get_wakeup_cause(),
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "boot reset_reason=%d (%s) wakeup_cause=%d ext1_status=0x%llx",
+             reset_reason, reset_reason_text(reset_reason), esp_sleep_get_wakeup_cause(),
              (unsigned long long)esp_sleep_get_ext1_wakeup_status());
 
     ESP_ERROR_CHECK(init_power_management());
@@ -3276,6 +3325,7 @@ void app_main(void)
     apply_watch_settings_ui();
     /* ui_status_init() hat den NVS schon aufgesetzt (Verlauf). */
     battery_log_load();
+    ui_status_set_history_save_cb(history_save_cb);
 #endif
     ESP_ERROR_CHECK(audio_tone_init());
 #if WRIST_WAKE_ENABLED
@@ -3319,6 +3369,14 @@ void app_main(void)
     }
 #endif
 
+    /*
+     * Diagnose vor dem teuersten Schritt: NimBLE braucht beim Start grosse
+     * zusammenhaengende Bloecke im internen RAM. Stuerzt eine Fassung hier
+     * ab, zeigt die Zeile davor, wie knapp es war.
+     */
+    ESP_LOGI(TAG, "internes RAM vor Bluetooth: frei %u, groesster Block %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     esp_err_t err = voice_ble_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(err));

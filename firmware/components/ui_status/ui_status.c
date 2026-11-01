@@ -1641,7 +1641,15 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * ausweist: "Pool rueckspuelen am Samstag" ueber "Aufgabe angelegt: ..."
      * liesse sonst offen, welcher der beiden Saetze vom Geraet kommt.
      */
-    char quoted[UI_QUESTION_MAX + 3] = "";
+    /*
+     * static: Gerendert wird nur unter s_lvgl_lock, die Puffer brauchen
+     * deshalb keinen eigenen Platz je Aufruf -- und render_scene_locked()
+     * laeuft auf dem Stack des jeweiligen Aufrufers (LVGL-Task, Ereignis-
+     * Task, app_main beim Start), wo gut 200 Byte lokale Puffer dazu
+     * den Unterschied zwischen knapp und uebergelaufen machen koennen.
+     */
+    static char quoted[UI_QUESTION_MAX + 3];
+    quoted[0] = '\0';
     if (question_text[0]) {
         snprintf(quoted, sizeof(quoted), "\"%s\"", question_text);
     }
@@ -1661,7 +1669,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         format_clock(clock_text, sizeof(clock_text));
         lv_obj_set_style_text_font(s_clock_label,
                                    clock_only ? UI_FONT_CLOCK_FACE : UI_FONT_CLOCK_SMALL, 0);
-        char event_line[UI_STATUS_FACE_LEN + 40];
+        static char event_line[UI_STATUS_FACE_LEN + 40]; /* unter s_lvgl_lock, siehe quoted */
         format_event(event_line, sizeof(event_line));
         const bool face_info = clock_only && !night && s_face_label[0] != NULL &&
                                (s_face_count > 0 || event_line[0] || s_battery_remaining[0]);
@@ -1785,8 +1793,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     }
     if (s_render_meta) {
         /* Punkt in der Farbe des Ergebnisses, dahinter Wort und Zeit: "erledigt · vor 12 min". */
-        char when[32];
-        char meta[64];
+        static char when[32]; /* unter s_lvgl_lock, siehe quoted */
+        static char meta[64];
         ui_history_format_when(when, sizeof(when), s_clock_valid ? s_meta_entry.at : 0,
                                (int64_t)time(NULL), s_clock_offset_min);
         const char *word = ui_outcome_word((ui_outcome_t)s_meta_entry.outcome);
@@ -2681,10 +2689,41 @@ static void history_save_now(void)
     }
 }
 
+/*
+ * Der Zeitgeber schreibt nicht selbst: Der esp_timer-Task hat 3,5 KB Stack,
+ * und nvs_set_blob/nvs_commit laufen durch den Flash-Treiber mit Cache-
+ * Sperre -- fuer den Sichern-Lauf gibt es den Ereignis-Task von main.c, der
+ * auch das Akku-Protokoll in den NVS schreibt. Deshalb nur ein Ruf an den
+ * Abnehmer (ui_status_set_history_save_cb); der reiht ein Ereignis ein und
+ * ruft ui_status_history_save() aus seinem Task. Ohne Abnehmer wird wie
+ * bis 0.4.1 direkt geschrieben.
+ *
+ * Ein Callback statt einer Abfrage im Akku-Takt, weil der Akku-Takt am Kabel
+ * und je Zustand anders laeuft und der Verlauf dann irgendwann zwischen 30 s
+ * und zehn Minuten im Flash laege -- so bleiben es 30 s nach der Aenderung.
+ */
+static ui_status_history_save_cb_t s_history_save_cb;
+
 static void history_save_timer_cb(void *arg)
 {
     (void)arg;
-    history_save_now();
+    if (s_history_save_cb) {
+        s_history_save_cb();
+    } else {
+        history_save_now();
+    }
+}
+
+void ui_status_set_history_save_cb(ui_status_history_save_cb_t cb)
+{
+    s_history_save_cb = cb;
+}
+
+void ui_status_history_save(void)
+{
+    if (s_history_dirty) {
+        history_save_now();
+    }
 }
 
 /* Sperre gehalten: Aenderung merken, Schreiben in 30 s. */

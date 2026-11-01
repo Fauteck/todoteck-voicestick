@@ -138,9 +138,22 @@ static void report_raise(float tilt)
 #define QMI_STATUS1 0x2F
 #define QMI_AX_L 0x35
 
-/* CTRL1: Adressen fortlaufend, Datenreihenfolge wie bisher, INT1 als Ausgang. */
-#define QMI_CTRL1_BASE 0x60
-#define QMI_CTRL1_INT1_EN 0x10
+/*
+ * CTRL1 (0x02) laut Registerbeschreibung des QMI8658A:
+ *   Bit 7  SIM            SPI 3-Draht (hier I2C: 0)
+ *   Bit 6  ADDR_AI        Adresse zaehlt beim Lesen mehrerer Bytes weiter
+ *   Bit 5  BE             Big Endian in den Datenregistern
+ *   Bit 4  INT2_EN        INT2 als Ausgang
+ *   Bit 3  INT1_EN        INT1 als Ausgang
+ *   Bit 2  FIFO_INT_SEL   FIFO-Interrupt auf INT1 statt INT2
+ *   Bit 0  SensorDisable  interne 2-MHz-Versorgung aus
+ * Bis 0.4.1 stand hier 0x60 | 0x10: Bit 5 schaltete Big Endian, read_acce
+ * setzt die Bytes aber Little Endian zusammen (Low zuerst), und 0x10 machte
+ * INT2 zum Ausgang -- INT1, an dem GPIO21 haengt, blieb hochohmig. Richtig:
+ * nur ADDR_AI (0x40) und INT1_EN (0x08).
+ */
+#define QMI_CTRL1_BASE 0x40
+#define QMI_CTRL1_INT1_EN 0x08
 /* CTRL8 Bit 7: CTRL9-Handshake ueber STATUSINT.7 statt ueber die INT1-Leitung. */
 #define QMI_CTRL8_HANDSHAKE_STATUSINT 0x80
 /*
@@ -341,18 +354,42 @@ static esp_err_t sensor_create(void)
 
 static esp_err_t int_pin_create(void)
 {
+    /*
+     * Der Interrupt wird hier noch NICHT konfiguriert (GPIO_INTR_DISABLE):
+     * gpio_config() ruft in IDF 5.5.1 am Ende gpio_intr_enable() -- mit
+     * .intr_type = GPIO_INTR_LOW_LEVEL waere der Pegel-Interrupt scharf,
+     * bevor gpio_isr_handler_add() den Handler einhaengt. Liegt GPIO21 in
+     * dem Moment auf 0 (der Sensor treibt INT1 erst mit scharfem WoM auf
+     * Ruhepegel 1, davor floatet die Leitung), feuert der Interrupt nach
+     * gpio_install_isr_service() endlos: gpio_isr_loop findet keinen
+     * Handler, loescht das Status-Bit, der Pegel bleibt 0, sofort wieder --
+     * Interrupt-Watchdog nach 300 ms, Panic, OTA-Rueckfall. So stuerzte
+     * 0.4.1 beim Start ab. Die Art des Interrupts setzt gpio_set_intr_type()
+     * unten, nachdem der Handler steht und der Interrupt aus ist -- wie
+     * init_pmic_irq() in main.c fuer den StickS3.
+     *
+     * Pull-up, obwohl der Sensor Push-Pull treibt: Der Ruhepegel der
+     * WoM-Leitung ist 1, und solange der Sensor sie nicht treibt (vor dem
+     * Scharfschalten, im Tiefschlaf), haelt der Pull-up sie oben statt sie
+     * schweben zu lassen.
+     */
     const gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << WOM_INT_GPIO,
         .mode = GPIO_MODE_INPUT,
-        /* Push-Pull-Ausgang des Sensors: keine Widerstaende, die dagegen ziehen. */
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_LOW_LEVEL,
+        .intr_type = GPIO_INTR_DISABLE,
     };
     esp_err_t err = gpio_config(&cfg);
     if (err != ESP_OK) {
         return err;
     }
+    /*
+     * Flags 0, nicht ESP_INTR_FLAG_IRAM: wom_isr ruft Code im Flash
+     * (gpio_intr_disable, xSemaphoreGiveFromISR). Auf der Uhr ist das der
+     * erste Aufruf von gpio_install_isr_service -- Touch und Tasten kommen
+     * spaeter und nehmen den Dienst, wie er ist (ESP_ERR_INVALID_STATE).
+     */
     err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
@@ -361,19 +398,26 @@ static esp_err_t int_pin_create(void)
     if (err != ESP_OK) {
         return err;
     }
-    /* Scharf erst mit watch(true). */
+    /* Handler steht, Interrupt aus; jetzt die Art setzen. Scharf erst mit watch(true). */
     gpio_intr_disable(WOM_INT_GPIO);
+    err = gpio_set_intr_type(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
+    if (err != ESP_OK) {
+        return err;
+    }
     /*
      * Dieselbe Leitung weckt aus dem Light Sleep: Ohne das wuerde der Chip
      * den Interrupt erst beim naechsten ohnehin faelligen Aufwachen sehen --
      * mit dem langsamen Verbindungsintervall bis zu zwei Sekunden spaeter.
      * Die Tasten (espressif/button, enable_power_save) machen es genauso.
+     *
+     * Hier nur die Weckquelle "GPIO" freigeben; welcher Pin weckt, setzt
+     * arm() mit gpio_wakeup_enable und disarm() nimmt es zurueck. Bis 0.4.1
+     * stand gpio_wakeup_enable dauerhaft hier: Solange WoM nicht scharf ist,
+     * treibt der Sensor die Leitung nicht und der Pin floatet ohne Pull --
+     * ein schwebender Low-Pegel weckt den Chip dann aus jedem Light Sleep
+     * sofort wieder auf.
      */
-    err = gpio_wakeup_enable(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
-    if (err == ESP_OK) {
-        err = esp_sleep_enable_gpio_wakeup();
-    }
-    return err;
+    return esp_sleep_enable_gpio_wakeup();
 }
 
 /*
@@ -438,6 +482,8 @@ static void arm(void)
     }
     wom_clear();
     s_int_fired = false;
+    /* Erst jetzt treibt der Sensor die Leitung auf Ruhepegel 1: Weckquelle und Interrupt scharf. */
+    (void)gpio_wakeup_enable(WOM_INT_GPIO, GPIO_INTR_LOW_LEVEL);
     gpio_intr_enable(WOM_INT_GPIO);
     s_armed = true;
 }
@@ -445,6 +491,7 @@ static void arm(void)
 static void disarm(void)
 {
     gpio_intr_disable(WOM_INT_GPIO);
+    (void)gpio_wakeup_disable(WOM_INT_GPIO);
     (void)wom_disarm(false);
     s_armed = false;
 }
@@ -493,6 +540,14 @@ esp_err_t wrist_wake_init(wrist_wake_cb_t on_raise)
         s_qmi = NULL;
         return err;
     }
+    /*
+     * Diagnose fuer den Monitor: INT1 ist jetzt Ausgang (CTRL1), WoM noch
+     * nicht scharf. Treibt der Sensor die Leitung, steht hier stabil 0 oder 1;
+     * floatet sie (falsches CTRL1-Bit, andere Leitung), wechselt der Wert von
+     * Start zu Start.
+     */
+    ESP_LOGI(TAG, "QMI8658 INT1 an GPIO%d: Pegel %d", (int)WOM_INT_GPIO,
+             gpio_get_level(WOM_INT_GPIO));
     s_on_raise = on_raise;
 
     BaseType_t ok = xTaskCreate(wrist_task, "wrist", 3072, NULL, 2, NULL);
@@ -536,6 +591,7 @@ void wrist_wake_prepare_deep_sleep(void)
      * der Task ist deshalb unschaedlich.
      */
     gpio_intr_disable(WOM_INT_GPIO);
+    (void)gpio_wakeup_disable(WOM_INT_GPIO);
     (void)wom_disarm(false);
     s_armed = false;
 }

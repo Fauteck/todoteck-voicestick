@@ -41,6 +41,13 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# Stack des main-Tasks (app_main): 6 KB statt der 3,5 KB Vorgabe. app_main
+# richtet Anzeige, Board, Sensor und Bluetooth ein und ruft dabei LVGL und
+# NimBLE mit ihren eigenen Puffern auf dem Stack -- 0.4.1 stuerzte auf der Uhr
+# vor der OTA-Bestaetigung ab, ohne Log; ein Stack-Ueberlauf in genau dieser
+# Phase ist einer der Kandidaten. Gilt fuer beide Geraete.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
 CONFIG_BT_CTRL_MODEM_SLEEP=y
 CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
 
