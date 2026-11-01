@@ -141,27 +141,34 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Abbrechen (Transkript) ui_status.c transcript_cancel  346 x 64          (205, 450)       6
  *   "Tippen fuer mehr"     ui_status.c toggle_more        280 x 52          (205, 436..456)  ganzer
  *                                                                                            Schirm
+ *   Nochmal / Rueckgaengig ui_status.c history_chip_at    170 x 56          y 438; x 115 /   6
+ *   (Verlauf, 1-2 Chips)                                                    295 (einer: 205)
  *   Kartenzeile  klein     ui_cards.c ui_cards_touch      378 x 59          x 205            6
  *   Kartenzeile  normal    ui_cards.c ui_cards_touch      378 x 72          x 205            6
  *   Kartenzeile  gross     ui_cards.c ui_cards_touch      378 x 72          x 205            6
  *   Rueckgaengig           ui_cards.c ui_cards_touch      240 x 56          (205, 434)       6
- *   OK - erledigt (Heute)  ui_cards.c ui_cards_touch      150 x 59/72/72    x 319, in der    6, Vorrang
- *                                                                           markierten Zeile vor Zeilen
- *                                                                           (y 101..427)     bei gleicher
+ *   OK - erledigt /        ui_cards.c ui_cards_touch      150 x 59/72/72    x 319, in der    6, Vorrang
+ *   OK - schalten                                                           markierten Zeile vor Zeilen
+ *   (Heute; Schalter `c`)                                                   (y 72..462)      bei gleicher
  *                                                                                            Mitte
  *   Kachel (2 x 3)         ui_control.c tile_at           183 x 134         x 107 / 302,     6
  *                                                                           y 127/273/419
  *   Ziffernblatt: Tippen   main.c handle_touch            ganzer Schirm     --               --
+ *   Wetterkarte            ui_weather.c                   keine (reine Anzeige)
  *
  * Die schmalste Flaeche ist die "Tippen fuer mehr"-Flaeche mit 52 px. Die
  * Kartenzeilen sind seit 0.3.6 auf zwei Textzeilen ausgelegt und damit
- * hoeher als die Regel verlangt: Ihre Hoehe faellt aus dem verfuegbaren
- * Platz (ROWS_BOTTOM - ROWS_TOP = 390) geteilt durch die Zeilen je Seite
- * (klein 6, normal 5, gross 5 -- ui_cards.c rows_per_page), minus 6 px
- * Luecke: 390 / 6 - 6 = 59 bzw. 390 / 5 - 6 = 72. Die Ecken sind ueberall
- * frei: Selbst die aeusseren Ja/Nein-Flaechen liegen mit x 75 bzw. 333 weit
- * innerhalb. Der OK-Chip liegt rechts in der markierten Heute-Zeile und ist
- * so hoch wie sie; seine rechte Kante (x 394) reicht an den Rand, die Mitte
- * (x 319) bleibt weit vor der Rundung.
+ * hoeher als die Regel verlangt: Ihre Hoehe faellt aus dem sichtbaren
+ * Ausschnitt (ROWS_BOTTOM - ROWS_TOP = 390) geteilt durch die Zeilen, die
+ * hineinpassen (klein 6, normal 5, gross 5 -- ui_cards.c rows_per_view),
+ * minus 6 px Luecke: 390 / 6 - 6 = 59 bzw. 390 / 5 - 6 = 72. Seit 0.4.0
+ * scrollt die Liste; getroffen werden die gerade sichtbaren Zeilen (eine am
+ * Rand angeschnittene mit), Trennzeilen der Gruppen (28 px) sind kein Ziel.
+ * Die Ecken sind ueberall frei: Selbst die aeusseren Ja/Nein-Flaechen liegen
+ * mit x 75 bzw. 333 weit innerhalb. Der OK-Chip liegt rechts in der
+ * markierten Zeile und ist so hoch wie sie; seine rechte Kante (x 394)
+ * reicht an den Rand, die Mitte (x 319) bleibt weit vor der Rundung. Die
+ * zwei Verlaufs-Chips (170 x 56, 10 px Luecke) beginnen bei x 30 und enden
+ * bei x 380; ihre Mitten liegen bei 115 und 295.
  */
 #define UI_HIT_TOLERANCE 6

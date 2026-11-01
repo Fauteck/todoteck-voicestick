@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.3.6","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.0","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -235,15 +235,17 @@ on the phone.
 
 ### Fork addition: watch face and cards (Waveshare watch)
 
-The bridge keeps the watch face and three cards (`today`, `shopping`,
-`switches`) current. Both are optional; the StickS3 ignores them.
+The bridge keeps the watch face and three list cards (`today`, `shopping`,
+`switches`) current; since 0.4.0 a fourth card, the weather, comes with its
+own `weather` event (see the 0.4.0 section). All of it is optional; the
+StickS3 ignores it.
 
 ```json
 {"event":"face","lines":["Pool rückspülen · 18:00","12° · Regen"],"event_title":"Zahnarzt","event_start":1793520000}
 {"event":"list","kind":"shopping","rev":7,"part":0,"items":[["Milch",""],["Brot",""]]}
 ```
 
-`face` carries up to three lines (40 bytes each) shown under the time, plus the
+`face` carries up to three lines (56 bytes each since 0.4.0, 40 before) shown under the time, plus the
 next calendar event (UTC seconds). The watch keeps the countdown itself and
 vibrates ten minutes before it starts.
 
@@ -316,16 +318,98 @@ Watch → bridge (state characteristic, like `choice` and `item`):
 {"event":"undo"}
 ```
 
-`undo` reverts the **last** card action (`item`). After every `item` the watch
-shows a "Rückgängig" chip for 5 s (gone earlier on a card switch or when the
-cards close) and sends nothing after that. The chip carries no ID: the bridge
-remembers the last action (kind, ID, target state) for 15 s and rejects older
-ones. The watch restores the row's previous look at once if the list it
-showed has not been replaced since (same `rev`); otherwise the next glance
-redraws it.
+`undo` reverts a card action (`item`). After every `item` the watch shows a
+"Rückgängig" chip for 5 s (gone earlier on a card switch or when the cards
+close); after that the action stays undoable for 15 min from the history
+(see the 0.4.0 section below). Since 0.4.0 the event carries the coordinates
+of the `item` it reverts (`kind`, `rev`, `index`); the bridge keeps the last
+20 card actions for 15 min and matches on them. A bare `{"event":"undo"}` from
+older firmware still reverts the last action. The watch restores the row's
+previous look at once if the list it showed has not been replaced since (same
+`rev`); otherwise the next glance redraws it.
 
 `device_info` is unchanged — the bridge recognises the watch by
 `"hardware":"watch_206"` as before.
+
+### Fork addition: history, weather page, list groups (0.4.0)
+
+Package G for the watch (11/2026). Everything here is optional in both
+directions: the StickS3 ignores it, watch firmware before 0.4.0 ignores
+unknown events and unknown JSON fields, and a bridge that sends none of it
+leaves the watch as it was in 0.3.6.
+
+**`outcome` and `ref` on `ui_state`** — bridge → watch, in the same write as
+the answer:
+
+```json
+{"event":"ui_state","state":"ready","text":"Aufgabe angelegt: Pool rückspülen","question":"Leg eine Aufgabe an, Pool rückspülen","outcome":"created","ref":12}
+```
+
+`outcome` is one of `created`, `done`, `answer`, `error`, `none` and becomes
+the marker of the history entry (green dot "angelegt" / "erledigt", grey
+"Antwort", red "Fehler"). `ref` (1–65535, counting up) is present only while
+the bridge can take the turn back; it is the handle for `undo_turn` below and
+is valid for 15 min. A failed undo comes back as `ready` with
+`"outcome":"error"` and the error text, not as `state:"error"`.
+
+**History chips** — watch → bridge, from a history entry:
+
+```json
+{"event":"repeat","text":"Leg eine Aufgabe an, Pool rückspülen"}
+{"event":"undo_turn","ref":12}
+{"event":"undo","kind":"today","rev":7,"index":3}
+```
+
+"Nochmal" sends `repeat` with the entry's question; the bridge runs it as a
+text turn, like the action sentence, and answers normally. "Rückgängig" sends
+`undo_turn` with the entry's `ref`, or — for an entry the watch itself wrote
+when a row was checked off or toggled — `undo` with the coordinates of that
+`item`. Both chips are offered for 15 min after the entry; the bridge answers
+`undo_turn` with a `ready` state whose `question` is "Rückgängig" and whose
+`outcome` is `done` or `error`. The watch keeps its last ten entries (time,
+question, answer, outcome, ref or card coordinates) in NVS, so they survive a
+restart; the first page of the history is the day's balance ("Heute · 4
+Befehle · 3 erledigt · 1 Frage · 0 Fehler"), counted on the watch from
+midnight local time.
+
+**`list` items with group and flags** — bridge → watch:
+
+```json
+{"event":"list","kind":"today","rev":7,"part":0,"items":[["Pool messen","18:00","#2ecc71","Heute",""],["Müll raus","31.10.","","Überfällig",""]]}
+{"event":"list","kind":"switches","rev":2,"part":0,"items":[["Licht Küche","1","","","c"]]}
+```
+
+Element 4 is the group heading (`today` only: "Angepinnt", "Überfällig",
+"Heute", "Außerdem wichtig"); the watch draws a thin heading line wherever it
+changes from the row before. Element 5 is a flag string: `c` means the row
+needs the OK step (a switch with `confirm` set in the app) — tap selects, the
+green "OK – schalten" chip toggles. A missing element reads as `""`. An `aux`
+that is a date (`31.10.`) marks an overdue task and is drawn red. Rows no
+longer sit on pages: the list scrolls, and up/down move it by one view.
+
+**`weather`** — bridge → watch, in up to four parts of at most 240 bytes;
+`part` names the section (0–3), it is not a sequence number. Part 0 clears
+the state and carries the summary; a bridge without weather sends part 0 with
+empty fields. Empty parts 1–3 are not sent.
+
+```json
+{"event":"weather","rev":3,"part":0,"now":"10° · Bewölkt","today":"14° / 6° · Regen 60 %","rain":"Regen ab 15 Uhr","sun":"07:14 - 16:58","wind":"18 km/h","stale":""}
+{"event":"weather","rev":3,"part":1,"hours":[["12h","11°",""],["13h","12°",""],["14h","12°",""],["15h","11°","r"],["16h","10°","r"],["17h","9°",""]]}
+{"event":"weather","rev":3,"part":2,"days":[["Mo","14° / 6°","Regen 60 %"],["Di","12° / 4°","Bewölkt"],["Mi","11° / 3°","Sonnig"],["Do","13° / 5°","Schauer 30 %"],["Fr","10° / 4°","Regen 80 %"]]}
+{"event":"weather","rev":3,"part":3,"pollen":["Hasel mäßig"],"warnings":["Sturmböen bis 18 Uhr"]}
+```
+
+All texts are at most 40 bytes and Latin-1 renderable (`°`, `·`, `-`; an
+`…` becomes `...` on the watch). `stale` is `""` or the local time of the
+snapshot ("08:30") when it is older than the server's limit; the watch then
+shows "Stand 08:30". The watch shows the weather as the fourth card right of
+Zuhause: page 1 now/today/rain/six hours/sun and wind, page 2 the next days,
+page 3 pollen and warnings (only when there are any). The first warning also
+sits in red under the title of page 1; a warning text the watch has not shown
+before makes it vibrate once. Until the first `weather` arrives the card says
+"Noch kein Wetter vom Handy.".
+
+`face` lines may now be up to 56 bytes (was 40); `event_title` stays at 40.
 
 ### Fork addition: `question` on `ui_state`
 
