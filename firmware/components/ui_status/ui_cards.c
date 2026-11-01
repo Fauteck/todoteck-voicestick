@@ -488,17 +488,32 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
     }
     card_list_t *list = &s_lists[s_kind];
     switch ((voice_board_gesture_t)gesture) {
+    /*
+     * Die Karten liegen rechts neben dem Zifferblatt in einer Reihe:
+     * Zifferblatt | Heute | Einkauf | Zuhause. Nach links wischen holt die
+     * naechste Karte von rechts; am Ende der Reihe passiert nichts (kein
+     * Ringlauf, sonst verliert man die Orientierung). Nach rechts geht es
+     * zurueck, von Heute aus aufs Zifferblatt.
+     */
     case VOICE_BOARD_SWIPE_LEFT:
-        hide_undo_locked();
-        s_kind = (ui_card_kind_t)((s_kind + 1) % UI_CARD_COUNT);
-        s_page_index = 0;
-        render_locked();
+        if (s_kind + 1 < UI_CARD_COUNT) {
+            hide_undo_locked();
+            s_kind = (ui_card_kind_t)(s_kind + 1);
+            s_page_index = 0;
+            render_locked();
+        } else {
+            action = UI_CARDS_END;
+        }
         break;
     case VOICE_BOARD_SWIPE_RIGHT:
-        hide_undo_locked();
-        s_kind = (ui_card_kind_t)((s_kind + UI_CARD_COUNT - 1) % UI_CARD_COUNT);
-        s_page_index = 0;
-        render_locked();
+        if (s_kind == 0) {
+            action = UI_CARDS_CLOSE;
+        } else {
+            hide_undo_locked();
+            s_kind = (ui_card_kind_t)(s_kind - 1);
+            s_page_index = 0;
+            render_locked();
+        }
         break;
     case VOICE_BOARD_SWIPE_UP:
         s_page_index = (uint8_t)((s_page_index + 1) % page_count(list));

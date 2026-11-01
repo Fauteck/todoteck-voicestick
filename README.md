@@ -194,7 +194,7 @@ Watch-only on top of that:
 | Yes/no on the screen | `choices` on `ui_state` become touch areas; a tap sends a `choice` event (docs/protocol.md) |
 | Gestures | One rule set for every scene — see the gesture table below |
 | Watch face lines and next event | Up to three lines from the bridge (`face`) under the time, plus the next calendar event as a countdown; ten minutes before it the watch vibrates three times |
-| Cards: Today, Shopping, Home | Swipe up from the watch face or the history. Left/right switches the card, up pages, down goes back. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
+| Cards: Today, Shopping, Home | They sit in a row to the right of the watch face: swipe left from the face for Today, again for Shopping and Home; swipe right goes back, from Today to the face. Swipe up from the face opens Today too; up pages, down goes back to the face. A tap checks off a task or shopping item, or toggles a Home Assistant switch — carried out by the bridge (`list`/`item`, docs/protocol.md). Dots show the card (top) and the page (bottom); Today rows carry the project colour as a stripe; empty cards show Tecki and a sentence |
 | Undo | For 5 s after a card tap a "Rückgängig" chip sits at the bottom of the card; a tap sends `undo` and restores the row |
 | Transcript first | The bridge shows what it understood (`transcript`) for 2 s before acting; "Abbrechen", a palm or a short press on the talk button stops it (`cancel_transcript`) |
 | Short answers | An answer longer than two lines shows its first sentence (at most ~90 characters) and "Tippen für mehr"; a tap shows the whole answer. Open yes/no questions are always shown in full. The history behaves the same and shows its position as dots |
@@ -208,17 +208,19 @@ Watch-only on top of that:
 | Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
 | Tecki as status | On the watch face and the ready scene a fixed ranking decides his pose: update running (eyes shut, dots) > no bridge (searching look) > battery ≤ 15 % without charging (tired) > mood > scene |
 
-Gestures on the watch — one rule set for every scene (the same table heads
+Gestures on the watch — one rule set for every scene. Horizontally everything
+sits in one row: history | watch face | Today | Shopping | Home, and a swipe to
+the left brings in what lies to the right (the same table heads
 `handle_touch` in `firmware/main/main.c`; touch areas are listed in
 `firmware/components/ui_status/ui_layout_watch206.h`):
 
 | Gesture | Watch face | Answer / history | Cards | Control centre |
 | --- | --- | --- | --- | --- |
 | Swipe down from the top edge | control centre | control centre | control centre | closes |
-| Swipe down | nothing | back to the watch face | back one level (cards close) | closes |
+| Swipe down | nothing | back to the watch face | back to the watch face | closes |
 | Swipe up | cards | cards | next page | closes |
-| Swipe left | into the history | older | next card | — |
-| Swipe right | — | newer | previous card | — |
+| Swipe left | Today | newer; from the newest back to the watch face | next card; nothing after Home | — |
+| Swipe right | into the history | older | previous card; from Today back to the watch face | — |
 | Tap | opens the history | yes/no; short ⇄ full answer; otherwise one older | check off / toggle; "Rückgängig" | tile |
 | Palm on the screen | everything quiet: recording discarded, layers closed, screen dark | | | |
 

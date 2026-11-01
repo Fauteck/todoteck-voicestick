@@ -35,6 +35,8 @@ void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_browse_history(void);
 /* Eine Antwort neuer -- das Gegenstueck zum Blaettern, fuer das Wischen auf der Uhr. */
 void ui_status_browse_newer(void);
+/* Steht gerade der Verlauf (oder sein leerer Zustand) auf dem Schirm? */
+bool ui_status_in_history(void);
 /* Zurueck aufs Ziffernblatt, ohne Bruecke auf "Koppeln". */
 void ui_status_show_home(void);
 /*
