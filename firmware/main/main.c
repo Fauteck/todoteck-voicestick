@@ -149,6 +149,8 @@ static bool s_light_sleep_on;
  *   cinema      Handgelenk weckt nicht, Antworten wecken den Schirm nicht
  *   saver       Energiesparen: dunkler, frueher gedimmt, keine Geste.
  *               Schaltet sich unter SAVER_AUTO_PERCENT von selbst ein.
+ *               An der Taktfrequenz aendert es nichts -- die regelt esp_pm
+ *               ohnehin nach Bedarf (siehe init_power_management).
  */
 static RTC_DATA_ATTR uint8_t s_brightness_level = 1;
 static RTC_DATA_ATTR bool s_silent;
@@ -245,6 +247,11 @@ static volatile bool s_event_reminded;
 /* Erst nach dem Start darf der Akku-Takt die Schlafart umstellen. */
 static bool s_pm_ready;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
+#if CONFIG_VOICE_BOARD_WATCH206
+/* 80 MHz, solange der Schirm hell ist (ESP_PM_APB_FREQ_MAX); siehe init_power_management. */
+static esp_pm_lock_handle_t s_display_apb_lock;
+static bool s_display_apb_locked;
+#endif
 static esp_timer_handle_t s_display_dim_timer;
 static esp_timer_handle_t s_deep_sleep_timer;
 static esp_timer_handle_t s_battery_refresh_timer;
@@ -504,6 +511,25 @@ static void apply_light_sleep(void)
     ESP_LOGI(TAG, "light sleep %s", light_sleep ? "an" : "aus (USB)");
 }
 
+/*
+ * Taktfrequenz (Paket H, Punkt 5) -- drei Stufen, alle ueber esp_pm:
+ *
+ *   XTAL (40 MHz)  ohne Sperre, also im Leerlauf; dazu Light Sleep (apply_light_sleep).
+ *   80 MHz         solange der Schirm hell ist (Uhr): s_display_apb_lock,
+ *                  eine ESP_PM_APB_FREQ_MAX-Sperre. Das ist die Stufe, auf
+ *                  der LVGL zeichnet und der Finger scrollt.
+ *   Maximum        nur mit s_cpu_freq_lock (ESP_PM_CPU_FREQ_MAX) beim
+ *                  Aufnehmen (Opus) und bei OTA. Auf der Uhr sind das 240 MHz
+ *                  (sdkconfig.defaults.watch206), auf dem StickS3 die 160 der
+ *                  Vorgabe.
+ *
+ * Warum nicht "beim Touch kurz 160": esp_pm kennt keine Zwischenstufe. Eine
+ * Sperre hebt entweder auf APB-Maximum (80) oder auf das konfigurierte
+ * Maximum; 160 waere nur zu haben, indem das Maximum selbst 160 wird -- dann
+ * aber auch fuers Aufnehmen. Sollte Scrollen bei 80 MHz ruckeln, ist das die
+ * Stellschraube: CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 statt 240 in
+ * sdkconfig.defaults.watch206, nicht eine weitere Sperre.
+ */
 static esp_err_t init_power_management(void)
 {
     const esp_pm_config_t pm_config = {
@@ -519,7 +545,30 @@ static esp_err_t init_power_management(void)
     if (err != ESP_OK) {
         return err;
     }
+#if CONFIG_VOICE_BOARD_WATCH206
+    err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "display_apb", &s_display_apb_lock);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
     return ESP_OK;
+}
+
+/* Schirm hell: 80 MHz halten; gedimmt oder aus: loslassen. Nur die Uhr. */
+static void set_display_apb_lock(bool on)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (!s_display_apb_lock || s_display_apb_locked == on) {
+        return;
+    }
+    const esp_err_t err = on ? esp_pm_lock_acquire(s_display_apb_lock)
+                             : esp_pm_lock_release(s_display_apb_lock);
+    if (err == ESP_OK) {
+        s_display_apb_locked = on;
+    }
+#else
+    (void)on;
+#endif
 }
 
 static esp_err_t acquire_recording_pm_locks(void)
@@ -666,6 +715,7 @@ static void set_display_off(bool off)
 static void note_activity(void)
 {
     if (s_display_dimmed) {
+        set_display_apb_lock(true);
         set_display_off(false);
         esp_err_t err = ui_status_set_brightness(active_brightness());
         if (err != ESP_OK) {
@@ -1830,6 +1880,8 @@ static void set_night_mode(bool on)
         set_display_off(false);
         s_display_dimmed = false;
         ui_status_set_idle_dimmed(false);
+        /* Am Kabel: die 80 MHz kosten nichts, was zaehlt, und die Uhrzeit bleibt fluessig. */
+        set_display_apb_lock(true);
         (void)ui_status_set_brightness(NIGHT_BRIGHTNESS);
     } else {
         (void)ui_status_set_brightness(active_brightness());
@@ -2126,6 +2178,7 @@ static void handle_palm(void)
     (void)ui_status_set_brightness(0);
     s_display_dimmed = true;
     ui_status_set_idle_dimmed(true);
+    set_display_apb_lock(false);
     if (s_display_dim_timer) {
         (void)esp_timer_stop(s_display_dim_timer);
     }
@@ -2942,6 +2995,7 @@ static void display_dim_timer_cb(void *arg)
         if (err == ESP_OK) {
             s_display_dimmed = true;
             ui_status_set_idle_dimmed(true);
+            set_display_apb_lock(false);
 #if WRIST_WAKE_ENABLED
             /* Ab jetzt lohnt die Geste: Es gibt etwas aufzuwecken. */
             wrist_wake_watch(wrist_wake_allowed());
@@ -3247,6 +3301,8 @@ void app_main(void)
                      (long long)rtc_epoch, (int)rtc_offset_min);
         }
     }
+    /* Der Schirm ist nach dem Start hell: 80 MHz halten, bis er dimmt. */
+    set_display_apb_lock(true);
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);
